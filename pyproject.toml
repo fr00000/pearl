@@ -23,6 +23,7 @@ py-pearl-mining = {workspace = true}
 vllm-miner = {workspace = true}
 pearl-gemm-build-utils = {workspace = true}
 pearl-gemm = {workspace = true}
+direct-miner = {workspace = true}
 # use torch compiled against nvidia runtime
 torch = [
   { index = "pytorch-cu129", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
@@ -59,5 +60,6 @@ members = [
   "py-pearl-mining",
   "miner/vllm-miner",
   "miner/pearl-gemm-build-utils",
-  "miner/pearl-gemm"
+  "miner/pearl-gemm",
+  "miner/direct-miner"
 ]

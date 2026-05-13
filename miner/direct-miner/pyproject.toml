@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "direct-miner"
+version = "0.1.0"
+description = "Pearl direct synthetic miner (Phase A baseline)"
+requires-python = ">=3.12"
+dependencies = [
+    "torch",
+    "miner-base",
+    "miner-utils",
+    "vllm-miner",
+    "pearl-gemm",
+]
+
+[project.scripts]
+direct-miner = "direct_miner.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/direct_miner"]
