@@ -56,5 +56,14 @@ class MinerConfig:
     # Gateway UDS socket path
     gateway_socket_path: str = "/tmp/pearlgw.sock"
 
+    # Path for structured per-matmul metrics
+    metrics_output_path: str = "/workspace/direct-miner-metrics.jsonl"
+
+    # Tag identifying which phase this run is testing (for filtering JSONL)
+    phase_tag: str = "phase_a"
+
+    # Phase B: enable B-side caching across iterations within a template
+    enable_b_cache: bool = False
+
 
 DEFAULT_CONFIG: Final = MinerConfig()

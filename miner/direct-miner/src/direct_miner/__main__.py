@@ -37,6 +37,18 @@ def main():
         "--log-level", default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"]
     )
+    parser.add_argument(
+        "--metrics-output", default="/workspace/direct-miner-metrics.jsonl",
+        help="JSONL output path for per-matmul diagnostics"
+    )
+    parser.add_argument(
+        "--phase-tag", default="phase_a",
+        help="phase tag for filtering JSONL across runs"
+    )
+    parser.add_argument(
+        "--enable-b-cache", action="store_true",
+        help="enable Phase B B-side artifact caching"
+    )
     args = parser.parse_args()
 
     setup_logging(args.log_level)
@@ -46,6 +58,9 @@ def main():
         max_in_flight=args.max_in_flight,
         seed=args.seed,
         log_interval=args.log_interval,
+        metrics_output_path=args.metrics_output,
+        phase_tag=args.phase_tag,
+        enable_b_cache=args.enable_b_cache,
     )
 
     miner = DirectMiner(config)

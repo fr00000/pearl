@@ -15,7 +15,7 @@ def test_basic_completion():
         a = torch.randn(512, 512, device="cuda")
         b = torch.randn(512, 512, device="cuda")
         _c = torch.matmul(a, b)
-        tracker.record_launch(a, b)
+        tracker.record_launch(None, a, b)
 
     assert tracker.current_in_flight() == 3, (
         f"Expected 3 in flight, got {tracker.current_in_flight()}"
@@ -38,7 +38,7 @@ def test_wait_for_slot_blocks():
         a = torch.randn(4096, 4096, device="cuda")
         b = torch.randn(4096, 4096, device="cuda")
         _c = torch.matmul(a, b)
-        tracker.record_launch(a, b)
+        tracker.record_launch(None, a, b)
 
     assert tracker.current_in_flight() == 2
 
@@ -65,17 +65,42 @@ def test_tensor_refs_kept_alive():
     initial_id = id(a)
 
     _c = torch.matmul(a, b)
-    tracker.record_launch(a, b)
+    tracker.record_launch(None, a, b)
 
     del a, b
     gc.collect()
 
     assert tracker.current_in_flight() == 1
     entry = tracker.in_flight[0]
-    assert id(entry[1]) == initial_id, "Tracker dropped tensor ref prematurely"
+    # entry layout: (event, metadata_dict, *refs); refs start at index 2
+    assert id(entry[2]) == initial_id, "Tracker dropped tensor ref prematurely"
 
     tracker.drain()
     print("test_tensor_refs_kept_alive: PASS")
+
+
+def test_on_complete_callback_fires():
+    """Verify on_complete is called once per completed work, with metadata."""
+    received = []
+
+    def on_complete(metadata: dict) -> None:
+        received.append(metadata)
+
+    tracker = CompletionTracker(max_in_flight=4, on_complete=on_complete)
+
+    for i in range(3):
+        a = torch.randn(512, 512, device="cuda")
+        b = torch.randn(512, 512, device="cuda")
+        _c = torch.matmul(a, b)
+        tracker.record_launch({"idx": i, "name": f"matmul_{i}"}, a, b)
+
+    tracker.drain()
+
+    assert len(received) == 3, f"Expected 3 callbacks, got {len(received)}"
+    assert [r["idx"] for r in received] == [0, 1, 2], (
+        f"Callback order wrong: {[r['idx'] for r in received]}"
+    )
+    print("test_on_complete_callback_fires: PASS")
 
 
 if __name__ == "__main__":
@@ -86,4 +111,5 @@ if __name__ == "__main__":
     test_basic_completion()
     test_wait_for_slot_blocks()
     test_tensor_refs_kept_alive()
+    test_on_complete_callback_fires()
     print("\nAll tests passed.")

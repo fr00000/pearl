@@ -8,69 +8,84 @@ the call site measures Python's launch rate, not GPU throughput.
 This module uses torch.cuda.Event to record actual completion times,
 and bounds in-flight work to prevent the Python launch loop from
 outpacing GPU drain (which causes OOM or stream backpressure stalls).
+
+Optionally invokes an on_complete callback per finished launch with
+metadata supplied at record_launch — fires AFTER the CUDA event has
+completed, so any diagnostic reads see actual GPU output.
 """
 
+import logging
 from collections import deque
-from typing import Any
+from typing import Any, Callable, Optional
 
 import torch
+
+
+logger = logging.getLogger(__name__)
 
 
 class CompletionTracker:
     """Tracks asynchronous CUDA work completion using events.
 
     Usage pattern:
-        tracker = CompletionTracker(max_in_flight=2)
+        tracker = CompletionTracker(max_in_flight=2, on_complete=cb)
         for _ in range(N):
-            tracker.wait_for_slot()       # block if at max
-            tracker.reap_completed()      # update counters for finished
+            tracker.wait_for_slot()
+            tracker.reap_completed()
             A, A_scales = make_a(...)
-            pearl_gemm_noisy(A, ...)      # async launch
-            tracker.record_launch(A, A_scales)  # event + ref hold
-        tracker.drain()  # on shutdown
+            pearl_gemm_noisy(A, ...)
+            tracker.record_launch({"meta": ...}, A, A_scales)
+        tracker.drain()
     """
 
-    def __init__(self, max_in_flight: int):
+    def __init__(
+        self,
+        max_in_flight: int,
+        on_complete: Optional[Callable[[dict], None]] = None,
+    ):
         if max_in_flight < 1:
             raise ValueError("max_in_flight must be >= 1")
         self.max_in_flight = max_in_flight
-        # Each entry: (cuda_event, *tensor_refs_to_hold_alive)
-        # Holding tensor refs prevents GC from freeing tensors the GPU is using
+        # Each entry: (event, metadata_dict, *tensor_refs)
         self.in_flight: deque[tuple[Any, ...]] = deque()
         self.completed_count: int = 0
+        self._on_complete = on_complete
 
-    def record_launch(self, *tensor_refs: torch.Tensor) -> None:
-        """Record event after the latest kernel launch.
+    def record_launch(
+        self,
+        metadata: dict | None,
+        *tensor_refs: torch.Tensor,
+    ) -> None:
+        """Record event after kernel launch.
 
-        tensor_refs are stored in the queue and held alive until the
-        event completes. Without this, Python GC could free tensors
-        the GPU is still actively using.
+        metadata is opaque to the tracker; passed to on_complete callback
+        when the event finishes. tensor_refs are stored to keep tensors
+        alive until the GPU is done with them.
         """
         event = torch.cuda.Event()
         event.record()
-        self.in_flight.append((event, *tensor_refs))
+        self.in_flight.append((event, metadata or {}, *tensor_refs))
 
     def reap_completed(self) -> int:
-        """Pop completed entries. Returns count freed in this call."""
+        """Pop completed entries; invoke callback for each. Returns count freed."""
         freed = 0
         while self.in_flight and self.in_flight[0][0].query():
-            # event.query() is non-blocking; True means all preceding
-            # work in the stream where the event was recorded is done
-            self.in_flight.popleft()
+            entry = self.in_flight.popleft()
+            _event, metadata, *_refs = entry
             self.completed_count += 1
             freed += 1
+            if self._on_complete is not None and metadata:
+                try:
+                    self._on_complete(metadata)
+                except Exception:
+                    logger.exception("on_complete callback failed")
         return freed
 
     def wait_for_slot(self) -> None:
-        """Block until in_flight count drops below max_in_flight.
-
-        First tries non-blocking reap; if still at cap, synchronizes
-        on the oldest event (most likely to complete soonest).
-        """
+        """Block until in_flight count drops below max_in_flight."""
         while len(self.in_flight) >= self.max_in_flight:
             if self.reap_completed() > 0:
                 continue
-            # Nothing finished yet; block on oldest
             self.in_flight[0][0].synchronize()
 
     def drain(self) -> None:
