@@ -89,6 +89,15 @@ def pearl_gemm_noisy(
     :param submit_block: Whether to submit mining results
     :return: Result matrix C
     """
+    import time as _time
+    if not hasattr(pearl_gemm_noisy, '_call_count'):
+        pearl_gemm_noisy._call_count = 0
+        pearl_gemm_noisy._start = _time.time()
+    pearl_gemm_noisy._call_count += 1
+    if pearl_gemm_noisy._call_count % 100 == 0:
+        elapsed = _time.time() - pearl_gemm_noisy._start
+        print(f"[PEARL MINING] {pearl_gemm_noisy._call_count} mining matmuls in {elapsed:.1f}s = {pearl_gemm_noisy._call_count/elapsed:.1f}/s", flush=True)
+
     assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
 
     m = a.shape[0]
