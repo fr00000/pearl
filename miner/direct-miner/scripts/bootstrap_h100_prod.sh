@@ -209,12 +209,13 @@ if [[ ! -d "$REPO_DIR/.git" ]]; then
     git clone "$PEARL_REPO_URL" pearl 2>&1 | tail -3
     cd "$REPO_DIR"
     git checkout "$PEARL_BRANCH"
-elif ! is_done "clone_pulled"; then
+else
+    # Always pull on re-run. Cheap operation; avoids the "I pushed a
+    # fix but the pod still runs the old code" footgun.
     cd "$REPO_DIR"
     git fetch origin "$PEARL_BRANCH" 2>&1 | tail -2
     git checkout "$PEARL_BRANCH"
     git pull origin "$PEARL_BRANCH" 2>&1 | tail -2
-    mark_done "clone_pulled"
 fi
 cd "$REPO_DIR"
 log "Repo head: $(git log -1 --oneline)"
@@ -267,13 +268,19 @@ log "Step 6: pearld"
 if ! pgrep -x pearld > /dev/null; then
     mkdir -p "$HOME/.pearld" "$PEARLD_DATA"
 
-    tmux new-session -d -s pearl 2>/dev/null || true
-    if tmux list-windows -t pearl 2>/dev/null | grep -q "^0:"; then
-        tmux rename-window -t pearl:0 pearld 2>/dev/null || true
-    else
-        tmux new-window -t pearl -n pearld
-    fi
+    # Ensure session + named window exist. Never rename existing
+    # windows — if window 0 was renamed to something else by the user
+    # we don't hijack it. ensure_window only creates "pearld" when
+    # no window by that name exists yet.
+    tmux new-session -d -s pearl -n bootstrap 2>/dev/null || true
+    tmux list-windows -t pearl -F '#{window_name}' 2>/dev/null | grep -qx pearld \
+        || tmux new-window -t pearl -n pearld
 
+    # pearld --miningaddr is set for symmetry with the canonical pod
+    # and as a fallback if pearld's internal miner is ever activated.
+    # The gateway (next step) builds its OWN coinbase tx using
+    # PEARLD_MINING_ADDRESS — that's the authoritative source for the
+    # direct-miner path. Both being the same address is intentional.
     tmux send-keys -t pearl:pearld \
         "$REPO_DIR/bin/pearld \
             --rpcuser=$PEARLD_RPC_USER \
@@ -297,7 +304,8 @@ fi
 log "Step 7: pearl-gateway (Python module via uv)"
 
 if ! pgrep -f "pearl-gateway start" > /dev/null; then
-    tmux new-window -t pearl -n gateway 2>/dev/null || true
+    tmux list-windows -t pearl -F '#{window_name}' 2>/dev/null | grep -qx gateway \
+        || tmux new-window -t pearl -n gateway
 
     tmux send-keys -t pearl:gateway \
         "cd $REPO_DIR && \
