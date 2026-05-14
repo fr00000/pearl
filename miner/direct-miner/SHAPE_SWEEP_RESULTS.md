@@ -2,7 +2,7 @@
 
 ## Configuration
 - Hardware: NVIDIA H100 80GB HBM3, driver 580.126.09
-- Phase: C (multi-stream, B-cache, `--no-diagnostics`, `--max-in-flight 4`)
+- Phase: C (multi-stream, B-cache, diagnostics off, `--max-in-flight 4`)
 - Duration per shape: 5 min (300s)
 - Sweep date: 2026-05-14 07:59 → 08:39 UTC
 - Total sweep time: ~40 min
@@ -79,6 +79,6 @@ If GPU memory becomes a concern (e.g., expanding `max_in_flight` further or shar
 
 ## Recommendation
 
-Switch the production miner to `--m 8192 --n 32768 --k 8192` with the existing Phase C flags (`--no-diagnostics --enable-b-cache --max-in-flight 4`). Expected tile rate: ~1.97M tiles/s, a 22% improvement on the previous production shape.
+Switch the production miner to `--m 8192 --n 32768 --k 8192` with the existing Phase C flags (`--enable-b-cache --max-in-flight 4`; diagnostics are off by default — pass `--enable-diagnostics` only when investigating). Expected tile rate: ~1.97M tiles/s, a 22% improvement on the previous production shape.
 
 If the user wants to be more conservative on GPU memory, `--m 4096 --n 32768 --k 8192` is essentially equivalent in throughput and uses half the slot-pool memory.

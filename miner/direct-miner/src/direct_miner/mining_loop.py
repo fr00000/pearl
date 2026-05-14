@@ -51,10 +51,10 @@ class DirectMiner:
         self.config = config
         self.b_pool: Optional[FixedBPool] = None
 
-        # Diagnostics: disabled in Phase C production runs via
-        # --no-diagnostics. Always enabled during verification.
+        # Diagnostics OFF by default (production); opt in with
+        # --enable-diagnostics during verification or investigation.
         self.diagnostics: Optional[DiagnosticsCollector] = None
-        if not config.disable_diagnostics:
+        if config.enable_diagnostics:
             self.diagnostics = DiagnosticsCollector(
                 output_path=config.metrics_output_path,
                 flush_every_n=100,
@@ -62,7 +62,6 @@ class DirectMiner:
             )
             on_complete = self._on_matmul_complete
         else:
-            logger.info("Diagnostics DISABLED (--no-diagnostics)")
             on_complete = None
 
         self.tracker = CompletionTracker(

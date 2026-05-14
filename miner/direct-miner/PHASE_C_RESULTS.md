@@ -120,4 +120,4 @@ At this point we are kernel-bound on `hopper_gemm_ws` (~425 µs per call ⇒ ~23
 - **Kernel-internal changes.** A fused noising-A + GEMM kernel, or measurable SM-occupancy headroom from ncu (currently blocked by `ERR_NVGPUCTRPERM`). Both are non-trivial and out of scope without unblocked profiling access.
 - **Different shapes.** Larger m/n/k would amortize the per-call overhead but doesn't help if we're hash-rate / proof-rate bound.
 
-The recommendation is to ship `--no-diagnostics --enable-b-cache --max-in-flight 4` as the production default and pursue multi-GPU as the next phase.
+The recommendation is to ship `--enable-b-cache --max-in-flight 4` as the production default (diagnostics are now off by default; `--enable-diagnostics` is the opt-in for validation/debugging) and pursue multi-GPU as the next phase.

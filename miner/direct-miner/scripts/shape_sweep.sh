@@ -2,8 +2,9 @@
 # Shape sweep for Phase C production miner.
 #
 # Runs each shape for $DURATION_S in Phase C production mode
-# (--no-diagnostics --enable-b-cache --max-in-flight 4) and emits a
-# CSV summary with measured throughput + tile rate.
+# (--enable-b-cache --max-in-flight 4; diagnostics off by default
+# since the rename of --no-diagnostics → --enable-diagnostics) and
+# emits a CSV summary with measured throughput + tile rate.
 #
 # Tile rate (= matmuls/s × outer_tiles/matmul) is the metric we
 # optimize, not raw matmul rate. Each tile is an independent
@@ -72,7 +73,6 @@ for entry in "${SHAPES[@]}"; do
             --m "$m" --n "$n" --k "$k" \
             --max-in-flight "$MAX_IN_FLIGHT" \
             --enable-b-cache \
-            --no-diagnostics \
             --log-interval 100 \
             --phase-tag "sweep_${shape_id}" \
             > "$log" 2>&1 &
