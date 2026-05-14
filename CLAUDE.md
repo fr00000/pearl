@@ -7,6 +7,10 @@ multi-stream A-side overlap.
 
 ## Your job as Claude Code
 
+The user runs this repo as a fleet operator: they spin up RunPod GPU instances,
+deploy the optimized miner on each, and watch the fleet collectively. Your two
+recurring jobs are **deploy** and **monitor**.
+
 When the user asks you to "deploy a miner" or similar, your goal is to:
 
 1. SSH into the user-provided RunPod pod
@@ -15,15 +19,53 @@ When the user asks you to "deploy a miner" or similar, your goal is to:
 3. Monitor the bootstrap to completion (~2-4 hours mostly waiting on pearld
    blockchain sync)
 4. Verify miners are running healthily
-5. Report back with rates, mining address, and useful follow-up commands
+5. **Append the new pod to `~/.pearl-fleet.json`** (see "Local fleet inventory" below)
+6. Report back with rates, mining address, and useful follow-up commands
+
+When the user asks you to "monitor my miners" or similar, your goal is to read
+the local fleet inventory and start a recurring health-check cron — see
+"Monitoring an existing fleet" below.
 
 This is **deployment work, not engineering work**. Do not modify code. Do not
 run sweeps. Do not change the production shape. The script and configuration
 are already validated; your job is to execute and verify.
 
+## Local fleet inventory
+
+The user's full fleet (all pods + the wallet address) lives at
+`~/.pearl-fleet.json` on their local machine. This file is **never committed**
+to the repo. Schema:
+
+```json
+{
+  "wallet_address": "prl1p8m4gv...",
+  "ssh_key": "~/.ssh/id_ed25519",
+  "pods": [
+    {
+      "id": "pod1",
+      "host": "103.207.149.106",
+      "port": 17770,
+      "user": "root",
+      "gpus": "2× H100 80GB HBM3",
+      "notes": "deployed 2026-05-14"
+    }
+  ]
+}
+```
+
+Behavior:
+- **Before asking the user for SSH or mining-address details, read this file.**
+  Use `cat ~/.pearl-fleet.json` (or the Read tool). The file is mode 0600 — your
+  read will succeed; never write it world-readable.
+- When the user mentions a pod by id (e.g. "pod 2", "the H200 pod"), resolve it
+  from the inventory rather than asking for connection details again.
+- If the file doesn't exist, the user hasn't bootstrapped a fleet yet — proceed
+  with the "Required inputs from the user" flow below.
+
 ## Required inputs from the user
 
-Before starting, you must have:
+If `~/.pearl-fleet.json` doesn't already contain what you need, ask the user
+for whatever's missing:
 
 - **SSH connection details**: host, port (often non-standard for RunPod), user
   (usually `root`), and either password or SSH key path. RunPod typically gives
@@ -251,6 +293,47 @@ Run pods one at a time during the build phase (avoid contention on GitHub if
 multiple pods cold-pull). The pearld sync can happen in parallel; that's
 peer-network limited, not GitHub.
 
+## Monitoring an existing fleet
+
+When the user asks to "monitor my miners" / "check the fleet" / similar:
+
+1. Read `~/.pearl-fleet.json` to get the pod list, SSH key, and wallet address.
+2. Confirm reachability with one parallel round of SSH (10 s timeout each).
+   Report any pods that don't respond and proceed with the rest.
+3. Start a recurring monitor via the `/loop` skill at a 5-minute cadence (use
+   cron `2-59/5 * * * *` to offset off `:00`). Pass the loop a prompt that:
+   - Queries `https://lordofpearls.xyz/api/wallet/txs?addr=<WALLET>` first;
+     compare `txs` to the prior run and flag with 🎉 on any increase.
+   - SSHs all pods in parallel using `-i <ssh_key> -p <port>` from the inventory.
+   - Per pod, checks `/tmp/direct-miner-pids/*.pid` (each `ps -p` alive),
+     newest `/workspace/logs/gpu*-*.log` per GPU for latest `completion_rate`
+     mm/s, `nvidia-smi --query-gpu=utilization.gpu` for util ≥ 80%, and
+     `~/pearl/bin/prlctl ... getblockchaininfo` for height + tip age.
+   - Reports a single OK line when all healthy, one extra line per anomaly,
+     and the 🎉 line when a new block is won.
+4. Run the first iteration immediately rather than waiting for the cron's
+   first fire.
+
+Alarm thresholds (defaults; user can override):
+- Per-GPU mm/s < 27 (≥10% drop from the ~31-32 mm/s steady state)
+- GPU util < 80%
+- A miner PID is missing or DEAD
+- pearld block height hasn't advanced for two consecutive checks
+
+When asked to **stop monitoring**, call `CronDelete` with the job ID.
+
+## Adding a new pod to the fleet
+
+After a successful deploy (CLAUDE.md step 6 done, miners verified), append the
+new pod to `~/.pearl-fleet.json`. Use the Read tool to load, edit the JSON to
+add an entry with the pod's `id` / `host` / `port` / `user` / `gpus` / a short
+`notes` (date + anything non-obvious like "MooseFS workspace" or "pre-existing
+pearld"). Write the file back. Keep mode 0600.
+
+If a recurring monitor is already running, delete and re-create it so the next
+fire includes the new pod. The cron's prompt is captured at create time — it
+won't auto-pick up inventory changes.
+
 ## Common failure modes
 
 ### `uv sync` fails partway
@@ -303,6 +386,42 @@ ssh ... "tail -30 /tmp/bootstrap.log"
 
 If you used Option B (direct stream), the bootstrap process likely died with
 your SSH session. Re-run from scratch using Option A.
+
+### "Gateway UDS socket not created at /tmp/pearlgw.sock"
+
+The bootstrap's Step 7 check is `sleep 12; [[ -S /tmp/pearlgw.sock ]] || die`.
+On a still-syncing pearld the gateway can take longer than 12 s to create the
+socket, so the bootstrap dies with this error even though the gateway is fine.
+
+Confirm by SSHing in and checking:
+
+```bash
+ssh ... "pgrep -f 'pearl-gateway start'; ls -la /tmp/pearlgw.sock"
+```
+
+If both succeed, the gateway is up — just re-run the bootstrap. It will skip
+Steps 6 and 7 (idempotent on already-running processes) and continue.
+
+### Standardizing a pre-existing pod under the prod bootstrap
+
+If you SSH into a pod and find pearld / gateway / a non-standard miner already
+running (e.g. miner uses `--phase-tag prod` instead of `prod_gpu0`, or no
+`--metrics-output`), you can standardize it without a full 30-40 min rebuild
+by pre-seeding the bootstrap state file:
+
+```bash
+ssh ... 'echo -e "system_update\ntoolchain\nbuild_python\nbuild_go" \
+    > ~/.pearl_bootstrap_state
+echo "<ADDR>" > ~/.pearl_mining_address && chmod 600 ~/.pearl_mining_address'
+```
+
+Then run the bootstrap normally. It skips Steps 1-5, idempotent-skips Steps
+6 and 7 (pearld + gateway already running), passes Step 8 immediately if
+truly synced, and Step 9 kills the existing miner via `pgrep` + SIGINT and
+relaunches it with the prod convention. About 10 seconds of mining downtime.
+
+Verify after: the new miner's process line should show `--phase-tag prod_gpu<N>`
+and `--metrics-output /workspace/metrics/gpu<N>-*.jsonl`.
 
 ## What NOT to do
 
