@@ -3,7 +3,10 @@
 # before the system libs (system has CUDA 12.8; cusparse expects 12.9).
 
 PEARL_ROOT="${PEARL_ROOT:-/root/pearl}"
-PEARL_VENV="${PEARL_ROOT}/.venv"
+# Override PEARL_VENV when the venv lives outside the repo dir, e.g. on
+# RunPod pods with a small / overlay where the venv is redirected to
+# /workspace via uv's UV_PROJECT_ENVIRONMENT.
+PEARL_VENV="${PEARL_VENV:-${PEARL_ROOT}/.venv}"
 
 if [ -d "${PEARL_VENV}/lib/python3.12/site-packages/nvidia" ]; then
     NVIDIA_LIBS=$(find "${PEARL_VENV}/lib/python3.12/site-packages/nvidia" -name "lib" -type d | tr '\n' ':')

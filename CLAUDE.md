@@ -76,17 +76,67 @@ Common issues: wrong port (RunPod uses non-22 ports), wrong key permissions
 ### Step 2: Verify the base image has what we need
 
 ```bash
-ssh ... "which nvcc && nvcc --version | head -3 && df -h / | tail -1"
+ssh ... "which nvcc; ls /usr/local/cuda*/bin/nvcc 2>/dev/null; which tmux; df -h | grep -E 'overlay|workspace'"
 ```
 
 Required:
 - `nvcc` present (need CUDA devel tools to build pearl-gemm kernels)
-- At least 60 GB free disk (pearld syncs ~10-50 GB; builds need ~5 GB; metrics)
+- `tmux` present
+- Enough writable disk for the build (see below)
 
-If `nvcc` is missing, the base image is wrong. Tell the user to re-provision
-with `nvidia/cuda:12.9.0-devel-ubuntu22.04` (or 24.04, or 12.8/12.6 devel —
-any `cuda:12.x-devel-*` works). Do not try to install CUDA toolkit on top of
-a non-devel image; that fight is not worth winning.
+#### Adapting to common RunPod quirks
+
+These came up on multiple pods; handle them in-place rather than re-provisioning.
+
+**nvcc installed but not in PATH.** Several RunPod CUDA images ship `nvcc` at
+`/usr/local/cuda/bin/nvcc` without adding it to PATH, so `which nvcc` returns
+nothing even though the toolchain is fully present. If you see this, add it
+to `~/.bashrc` on the pod before running the bootstrap:
+
+```bash
+ssh ... 'grep -q "Pearl CUDA PATH" ~/.bashrc || cat >> ~/.bashrc <<"EOF"
+# Pearl CUDA PATH
+export PATH=/usr/local/cuda/bin:$PATH
+EOF'
+```
+
+Also pass `export PATH=/usr/local/cuda/bin:$PATH` inline in the tmux send-keys
+command (tmux's new shell may not source .bashrc fast enough for the curl|bash
+that follows). If `nvcc` is genuinely missing from disk, re-provision with
+`nvidia/cuda:12.9.0-devel-ubuntu22.04` (or 24.04, or 12.8/12.6 devel — any
+`cuda:12.x-devel-*` works). Do not try to install CUDA toolkit on top of a
+non-devel image; that fight is not worth winning.
+
+**Small `/` overlay (<40 GB).** The bootstrap installs to `/root/pearl` and
+its venv ends up at `/root/pearl/.venv` (~5 GB) with uv cache at
+`/root/.cache/uv` (~14 GB during builds). On RunPod pods with a 20–30 GB
+overlay the build will hit `No space left on device` mid-uv-sync. Redirect
+both to `/workspace` (typically 250 GB+, either local NVMe or MooseFS —
+both work) by exporting three env vars:
+
+```bash
+ssh ... 'grep -q "Pearl UV redirect" ~/.bashrc || cat >> ~/.bashrc <<"EOF"
+# Pearl UV redirect (overlay is small, use /workspace)
+export UV_CACHE_DIR=/workspace/uv-cache
+export UV_PROJECT_ENVIRONMENT=/workspace/pearl-venv
+export PEARL_VENV=/workspace/pearl-venv
+EOF
+mkdir -p /workspace/uv-cache'
+```
+
+- `UV_CACHE_DIR` puts the download/build cache on /workspace.
+- `UV_PROJECT_ENVIRONMENT` tells `uv sync`/`uv run` to use a venv at that path
+  instead of the repo-local `./.venv`.
+- `PEARL_VENV` tells `env.sh` to look there for the bundled CUDA libs when
+  setting `LD_LIBRARY_PATH` (without this, `import direct_miner` fails with
+  `libc10.so: cannot open`).
+
+Pass the same three exports inline in the tmux send-keys command alongside
+the PATH fix — the new shell tmux spawns may not finish sourcing `.bashrc`
+before the curl|bash starts.
+
+**Missing tmux.** Some images don't ship it: `apt-get install -y tmux`
+before Step 3.
 
 ### Step 3: Kick off the bootstrap
 
@@ -161,8 +211,11 @@ ssh ... "pgrep pearld > /dev/null && echo 'pearld OK'; pgrep -f 'pearl-gateway s
 
 Acceptable state:
 - One miner PID per GPU (matches `nvidia-smi --list-gpus` count)
-- Each miner showing completion_rate near 32 mm/s and tile_rate near 2,100,000
-- GPU utilization 85-95% on each GPU
+- Each miner showing completion_rate 30-32 mm/s and tile_rate ~2.0-2.1M.
+  The lower end of the range is expected when the network is small (low
+  difficulty, frequent template churn); the high end matches well-warmed
+  steady-state on a fully-loaded chain. Don't flag 31 mm/s as a failure.
+- GPU utilization 85-100% on each GPU
 - No errors in logs
 - Gateway socket present, pearld and gateway processes alive
 
