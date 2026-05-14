@@ -104,10 +104,36 @@ def pearl_gemm_noisy_phase_c(
     function invokes it directly via the outer finally to release the
     slot — exactly one release path runs.
     """
+    # PREFLIGHT: verify async event processing is enabled BEFORE any
+    # GPU work or pinned-header acquisition. If we discover the config
+    # is wrong AFTER launching the kernel, releasing the slot would
+    # race the in-flight kernel writing to slot.A. Fail before we have
+    # anything to clean up.
+    if submit_block:
+        manager = get_async_manager()
+        if not manager._conf.enable_async_cuda_event_processing:
+            raise RuntimeError(
+                "Direct miner requires async CUDA event processing "
+                "(enable_async_cuda_event_processing=True). The slot "
+                "lifetime contract depends on the async callback "
+                "firing to release slot ownership."
+            )
+
     # Tracks whether ownership of on_callback_done has been
     # transferred to a scheduled callback (or whether we still
     # owe the release on the error path).
     scheduled_or_owned = False
+
+    # Tracks whether the main kernel has been launched on stream_main.
+    # If True and scheduled_or_owned is False (some post-launch
+    # failure between record() and successful schedule_status_check),
+    # the outer finally must synchronize completion_event before
+    # releasing the slot to avoid reading slot.A mid-write.
+    kernel_launched = False
+
+    # Acquired only if we enter the GPU-work path. Lives in the outer
+    # scope so the finally block can release it on failure paths.
+    host_signal_header_pinned = None
 
     try:
         m, k = slot.A.shape
@@ -299,6 +325,7 @@ def pearl_gemm_noisy_phase_c(
 
         completion_event = torch.cuda.Event()
         completion_event.record(stream_main)
+        kernel_launched = True
 
         # Post-launch: populate cache and schedule status-check callback.
         if b_cache is not None and cached is None:
@@ -330,41 +357,55 @@ def pearl_gemm_noisy_phase_c(
                 else inner_cb
             )
 
-            # Verify async event processing is actually enabled before
-            # transferring slot ownership. schedule_status_check() returns
-            # silently (just warns) when async is off, which would leave
-            # the slot permanently held by a never-firing callback.
-            # Defaults have async enabled; this is defense against config
-            # drift, not a routine code path.
-            manager = get_async_manager()
-            if not manager._conf.enable_async_cuda_event_processing:
-                raise RuntimeError(
-                    "Direct miner requires async CUDA event processing "
-                    "(enable_async_cuda_event_processing=True). The slot "
-                    "lifetime contract depends on the async callback "
-                    "firing to release slot ownership."
-                )
-
-            manager.schedule_status_check(completion_event, wrapped_cb)
+            # Async-enabled check already happened in preflight at
+            # function entry. schedule_status_check could still raise
+            # for other internal reasons; outer finally handles cleanup
+            # via the kernel_launched + scheduled_or_owned flags.
+            get_async_manager().schedule_status_check(completion_event, wrapped_cb)
             host_signal_header_pinned = None  # owned by callback
             # Ownership of on_callback_done has been transferred to the
             # callback wrapper; outer finally must NOT release.
             scheduled_or_owned = True
         else:
             get_pinned_pool().release(host_signal_header_pinned)
-            del host_signal_header_pinned
+            host_signal_header_pinned = None
             # No callback scheduled — outer finally releases the slot.
 
         return slot.C, b_cache_hit, completion_event
 
     finally:
-        # If we never successfully transferred ownership to a
-        # callback, the slot is still our responsibility.
-        if not scheduled_or_owned and on_callback_done is not None:
-            try:
-                on_callback_done()
-            except Exception:
-                logger.exception("Slot release in outer finally failed")
+        if not scheduled_or_owned:
+            # If the kernel was launched but scheduling failed (or any
+            # other post-launch error), the GPU may still be writing
+            # to slot.A. Wait for it to finish before releasing the
+            # slot — otherwise the next iteration's kernel races this
+            # one's write.
+            if kernel_launched:
+                try:
+                    completion_event.synchronize()
+                except Exception:
+                    logger.exception(
+                        "Failed to synchronize completion event before "
+                        "slot release; proceeding to release anyway"
+                    )
+
+            # Release pinned header if we still own it. Successful
+            # scheduling transferred ownership by setting
+            # host_signal_header_pinned = None.
+            if host_signal_header_pinned is not None:
+                try:
+                    get_pinned_pool().release(host_signal_header_pinned)
+                except Exception:
+                    logger.exception(
+                        "Failed to release pinned header in outer finally"
+                    )
+
+            # Release the slot.
+            if on_callback_done is not None:
+                try:
+                    on_callback_done()
+                except Exception:
+                    logger.exception("Slot release in outer finally failed")
 
 
 # Legacy single-stream cached call retained for profile_run.py compatibility.
