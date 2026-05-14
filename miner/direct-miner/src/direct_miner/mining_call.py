@@ -329,7 +329,23 @@ def pearl_gemm_noisy_phase_c(
                 if on_callback_done is not None
                 else inner_cb
             )
-            get_async_manager().schedule_status_check(completion_event, wrapped_cb)
+
+            # Verify async event processing is actually enabled before
+            # transferring slot ownership. schedule_status_check() returns
+            # silently (just warns) when async is off, which would leave
+            # the slot permanently held by a never-firing callback.
+            # Defaults have async enabled; this is defense against config
+            # drift, not a routine code path.
+            manager = get_async_manager()
+            if not manager._conf.enable_async_cuda_event_processing:
+                raise RuntimeError(
+                    "Direct miner requires async CUDA event processing "
+                    "(enable_async_cuda_event_processing=True). The slot "
+                    "lifetime contract depends on the async callback "
+                    "firing to release slot ownership."
+                )
+
+            manager.schedule_status_check(completion_event, wrapped_cb)
             host_signal_header_pinned = None  # owned by callback
             # Ownership of on_callback_done has been transferred to the
             # callback wrapper; outer finally must NOT release.

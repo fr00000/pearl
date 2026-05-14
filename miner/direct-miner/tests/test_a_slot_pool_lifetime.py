@@ -1,8 +1,11 @@
-"""Test that ASlotPool acquire() blocks until release() is called.
+"""Test ASlotPool slot-lifetime contract (v2: fail-closed).
 
-Verifies the fix for the slot-reuse-vs-callback race that would
-corrupt winning proofs. CPU-only — exercises the lifecycle gate,
-not the CUDA tensor work.
+v1 used acquire(timeout=30.0) and force-released on expiry, reopening
+the corruption window the fix was meant to close. v2 raises
+SlotAcquireTimeout and never mutates state on timeout. Default
+timeout=None blocks indefinitely so production miners surface stuck
+callbacks as visible hangs (operator-recoverable) rather than silent
+risk.
 """
 
 import threading
@@ -10,7 +13,7 @@ import time
 
 import pytest
 
-from direct_miner.a_slot_pool import ASlotPool
+from direct_miner.a_slot_pool import ASlotPool, SlotAcquireTimeout
 
 
 @pytest.fixture
@@ -29,30 +32,29 @@ def pool():
 
 def test_acquire_blocks_until_release(pool):
     """Slot reuse must block until the prior callback called release()."""
-    # First acquire of slot 0 — clears the gate.
     idx_a, _ = pool.acquire()
     assert idx_a == 0
 
-    # Slot 1 acquires fine (different slot).
     idx_b, _ = pool.acquire()
     assert idx_b == 1
 
-    # Third acquire (round-robin returns to slot 0) must BLOCK.
+    # Third acquire (round-robin to slot 0) must BLOCK.
     acquired_event = threading.Event()
 
     def try_acquire():
-        pool.acquire(timeout=2.0)
-        acquired_event.set()
+        try:
+            pool.acquire(timeout=2.0)
+            acquired_event.set()
+        except SlotAcquireTimeout:
+            pass
 
     t = threading.Thread(target=try_acquire, daemon=True)
     t.start()
 
-    # Give it 200ms to (incorrectly) return; should still be blocked.
     assert not acquired_event.wait(0.2), (
         "acquire() returned before release() — race fix is broken"
     )
 
-    # Now release slot 0; the blocked thread should proceed.
     pool.release(0)
     assert acquired_event.wait(1.0), "release() did not unblock acquire()"
     t.join(timeout=1.0)
@@ -62,7 +64,6 @@ def test_release_invalid_slot_is_noop(pool):
     """release() with an out-of-range idx logs but doesn't crash."""
     pool.release(-1)
     pool.release(99)
-    # Pool still functional after garbage releases.
     idx, slot = pool.acquire()
     assert slot is not None
     assert idx == 0
@@ -72,27 +73,72 @@ def test_double_release_is_safe(pool):
     """Calling release() twice for the same slot is idempotent."""
     idx, _ = pool.acquire()
     pool.release(idx)
-    pool.release(idx)  # Event.set() second time is a no-op.
-    # Subsequent acquire still works.
+    pool.release(idx)
     idx2, _ = pool.acquire()
     assert idx2 is not None
 
 
-def test_timeout_unblocks_with_warning(pool):
-    """If both slots are held, the third acquire times out and proceeds."""
+def test_acquire_raises_on_timeout(pool):
+    """When both slots are held, acquire(timeout=...) raises rather
+    than force-releasing. The v1 'proceed anyway' behavior reopened
+    the corruption window; v2 fails closed."""
     pool.acquire()  # holds slot 0
     pool.acquire()  # holds slot 1
-    # Third acquire (round-robin slot 0 again) should time out and
-    # proceed defensively rather than hang.
+
     start = time.monotonic()
-    idx, slot = pool.acquire(timeout=0.5)
+    with pytest.raises(SlotAcquireTimeout, match="Slot 0 acquire timed out"):
+        pool.acquire(timeout=0.5)
     elapsed = time.monotonic() - start
     assert 0.4 < elapsed < 1.5, f"timeout was {elapsed:.2f}s, expected ~0.5s"
-    assert slot is not None
+
+
+def test_timeout_does_not_mark_slot_released(pool):
+    """After acquire() times out, the slot's Event is still cleared.
+    A subsequent release() must unblock future acquires; the timeout
+    must NOT have set the Event itself (that was the v1 bug)."""
+    pool.acquire()  # holds slot 0
+    pool.acquire()  # holds slot 1
+
+    with pytest.raises(SlotAcquireTimeout):
+        pool.acquire(timeout=0.2)
+
+    # Now release slot 0; future acquire should succeed and return slot 0
+    # (round-robin _next_slot did not advance on the failure path).
+    pool.release(0)
+    idx, _ = pool.acquire(timeout=1.0)
+    assert idx == 0, (
+        "Expected slot 0 (timeout should not have advanced _next_slot); "
+        f"got slot {idx}"
+    )
+
+
+def test_acquire_with_no_timeout_blocks_indefinitely(pool):
+    """The default timeout=None must block forever, not silently succeed.
+    Test via short-lived thread: it should still be alive after 500ms."""
+    pool.acquire()  # holds slot 0
+    pool.acquire()  # holds slot 1
+
+    finished = threading.Event()
+
+    def try_acquire_no_timeout():
+        pool.acquire()  # default timeout=None — must block forever
+        finished.set()
+
+    t = threading.Thread(target=try_acquire_no_timeout, daemon=True)
+    t.start()
+
+    assert not finished.wait(0.5), (
+        "acquire() with default timeout=None should block indefinitely; "
+        "it returned without anyone calling release()"
+    )
+
+    # Unblock for clean test exit.
+    pool.release(0)
+    assert finished.wait(1.0)
+    t.join(timeout=1.0)
 
 
 def test_wait_all_released_returns_true_when_idle():
-    """Fresh pool starts with all slots released — wait_all returns immediately."""
     p = ASlotPool(
         num_slots=4, m=64, n=64, k=64, noise_rank=16,
         host_signal_sync_size=128, scratchpad_bytes=512, device="cpu",
@@ -103,7 +149,6 @@ def test_wait_all_released_returns_true_when_idle():
 
 
 def test_wait_all_released_returns_false_on_held_slot():
-    """If a slot is held without release, wait_all reports failure."""
     p = ASlotPool(
         num_slots=2, m=64, n=64, k=64, noise_rank=16,
         host_signal_sync_size=128, scratchpad_bytes=512, device="cpu",

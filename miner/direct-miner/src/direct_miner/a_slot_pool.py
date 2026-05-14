@@ -21,6 +21,15 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+class SlotAcquireTimeout(RuntimeError):
+    """Raised when ASlotPool.acquire() times out waiting for a slot's
+    previous async callback to release it. Indicates a stuck callback;
+    the safe response is to stop the miner, not to proceed and risk
+    reading slot.A while the next iteration writes it.
+    """
+    pass
+
+
 @dataclass
 class ASlot:
     """A-side intermediate tensors owned by one in-flight slot."""
@@ -132,26 +141,30 @@ class ASlotPool:
             f"{per_slot_bytes / 1024 / 1024:.1f} MB = {total_mb:.1f} MB"
         )
 
-    def acquire(self, timeout: float = 30.0) -> tuple[int, ASlot]:
+    def acquire(self, timeout: float | None = None) -> tuple[int, ASlot]:
         """Return (slot_idx, slot). Blocks until the slot's previous
         async callback (if any) has released it.
 
-        timeout: max seconds to wait before logging and proceeding.
-        Default 30s is generous; normal release latency is <10ms (async
-        event poll interval). A real block here indicates a stuck
-        callback — log loudly and proceed to avoid permanent deadlock.
+        timeout: max seconds to wait. Default None means block
+        indefinitely — the right behavior in production, where a stuck
+        callback indicates a real bug we'd rather surface as a hang
+        (visible to operators) than silently risk tensor corruption.
+
+        Tests and supervised runs may pass a finite timeout; on
+        timeout, raises SlotAcquireTimeout. NEVER force-releases the
+        slot — the caller is responsible for choosing how to recover
+        (typically: drain, exit cleanly, let the bootstrap script's
+        idempotent re-run path bring the miner back up).
         """
         slot_idx = self._next_slot
-        if not self._callback_done[slot_idx].wait(timeout=timeout):
-            logger.error(
+        released = self._callback_done[slot_idx].wait(timeout=timeout)
+        if not released:
+            raise SlotAcquireTimeout(
                 f"Slot {slot_idx} acquire timed out after {timeout}s — "
-                "callback for previous iteration may be stuck. "
-                "Proceeding anyway to avoid deadlock; THIS RISKS TENSOR CORRUPTION."
+                "callback from previous iteration has not completed. "
+                "This indicates a stuck async callback; the miner should "
+                "exit rather than risk reading slot tensors mid-write."
             )
-            # Force-clear to prevent permanent deadlock; the warning
-            # surfaces the underlying issue.
-            self._callback_done[slot_idx].set()
-
         self._callback_done[slot_idx].clear()
         slot = self.slots[slot_idx]
         self._next_slot = (self._next_slot + 1) % self.num_slots

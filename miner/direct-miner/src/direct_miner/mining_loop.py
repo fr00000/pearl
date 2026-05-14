@@ -20,7 +20,7 @@ from vllm_miner.mining_state import (
     get_async_manager,
 )
 
-from .a_slot_pool import ASlotPool
+from .a_slot_pool import ASlotPool, SlotAcquireTimeout
 from .b_cache import BSideCache
 from .completion_tracker import CompletionTracker
 from .config import MinerConfig
@@ -187,15 +187,46 @@ class DirectMiner:
                 self._mine_one_iteration(generator)
         except KeyboardInterrupt:
             logger.info("Interrupted; draining in-flight work...")
-            self.tracker.drain()
-            # Async callbacks (StatusCheckCallback) may still hold refs
-            # to slot.A / slot.commitment_hash_A — let them finish any
-            # win-path work before we tear down.
-            logger.info("Waiting for async callbacks to release slots...")
-            self.a_pool.wait_all_released(timeout=30.0)
+            self._shutdown_drain()
             self._log_final_stats()
             if self.diagnostics is not None:
                 self.diagnostics.close()
+        except SlotAcquireTimeout:
+            logger.critical(
+                "Mining loop exiting due to slot lifetime failure. "
+                "Draining and shutting down — bootstrap re-run will "
+                "bring the miner back up."
+            )
+            self._shutdown_drain()
+            self._log_final_stats()
+            if self.diagnostics is not None:
+                self.diagnostics.close()
+            # Re-raise so the process exits with a non-zero status that
+            # operators (and monitor cron) can detect as a hard failure.
+            raise
+
+    def _shutdown_drain(self) -> None:
+        """Best-effort drain on shutdown. Order matters:
+        1. Caller has already stopped feeding new launches.
+        2. Drain CompletionTracker — wait for queued kernels to finish.
+        3. Wait for async callbacks to release their slots.
+
+        Step 3 may time out if a callback is the reason we're shutting
+        down; we log and exit anyway.
+        """
+        logger.info("Draining CompletionTracker (waiting for in-flight kernels)...")
+        try:
+            self.tracker.drain()
+        except Exception:
+            logger.exception("Tracker drain failed")
+
+        logger.info("Waiting for async callbacks to release slots...")
+        all_released = self.a_pool.wait_all_released(timeout=30.0)
+        if not all_released:
+            logger.warning(
+                "Not all slots released within 30s drain deadline; "
+                "some callbacks may have been stuck. Exiting anyway."
+            )
 
     def _capture_template_metadata(self) -> dict:
         mining_job = get_async_manager().get_mining_job()
@@ -247,7 +278,17 @@ class DirectMiner:
                 f"target_log2={target_str}"
             )
 
-        slot_idx, slot = self.a_pool.acquire()
+        try:
+            slot_idx, slot = self.a_pool.acquire()
+        except SlotAcquireTimeout as e:
+            # Stuck callback — fail closed. Continuing to mine would
+            # risk reading slot.A while the next kernel writes it.
+            # Surface via exception; run() will drain and exit.
+            logger.critical(
+                f"A-slot lifetime failure: {e}. Stopping miner — "
+                "bootstrap script re-run will bring it back up cleanly."
+            )
+            raise
 
         callback_meta = dict(meta)
         callback_meta["b_cache_hit"] = None
