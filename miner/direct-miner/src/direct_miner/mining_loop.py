@@ -9,16 +9,17 @@ import torch
 
 from miner_base.commitment_hash import CommitmentHasher
 from miner_base.gpu_matmul_config import GPUMatmulConfigFactory
-from vllm_miner.gemm_operators import pearl_gemm_noisy
 from vllm_miner.mining_state import (
     init_async_manager,
     init_pinned_pool,
     get_async_manager,
 )
 
-from .config import MinerConfig
+from .b_cache import BSideCache
 from .completion_tracker import CompletionTracker
+from .config import MinerConfig
 from .diagnostics import DiagnosticsCollector, target_to_log2
+from .mining_call import pearl_gemm_noisy_cached
 from .synthetic_data import FixedBPool, make_synthetic_a
 
 
@@ -57,20 +58,11 @@ class DirectMiner:
             on_complete=self._on_matmul_complete,
         )
 
-        # Phase B B-side cache (None unless enabled). Implementation lands
-        # in Part 2; for now, the field is reserved so config.enable_b_cache
-        # produces a clear "not yet implemented" message.
-        self.b_cache = None
+        # Phase B B-side cache (None unless enabled).
+        self.b_cache: BSideCache | None = None
         if config.enable_b_cache:
-            try:
-                from .b_cache import BSideCache
-                self.b_cache = BSideCache()
-                logger.info("B-side cache ENABLED (Phase B)")
-            except ImportError:
-                logger.warning(
-                    "enable_b_cache=True but b_cache module not available; "
-                    "running without cache."
-                )
+            self.b_cache = BSideCache()
+            logger.info("B-side cache ENABLED (Phase B)")
 
         # Tile-rate accounting
         self._outer_tiles_per_matmul = (
@@ -248,32 +240,31 @@ class DirectMiner:
             generator=generator,
         )
 
-        # Phase B b_cache_hit tracking. None when cache is disabled (Phase A).
-        # Set to True/False per call when cache is enabled (Phase B).
-        meta["b_cache_hit"] = None
-        if self.b_cache is not None:
-            meta["b_cache_hit"] = self.b_cache.get(meta["hash_key"]) is not None
-            # Population/use of the cached value is Part 2's wiring; this
-            # branch is the diagnostic-only stub that goes live there.
-
         # Drop the full hash_key before passing through the tracker; the
         # callback only needs the public-facing prefix and other primitives.
+        # b_cache_hit is filled in below from the actual call's return value.
         callback_meta = {k: v for k, v in meta.items() if k != "hash_key"}
+        callback_meta["b_cache_hit"] = None
 
         try:
-            pearl_gemm_noisy(
+            _C, b_cache_hit = pearl_gemm_noisy_cached(
                 A,
                 self.b_pool.B,
-                scale_a=A_scales,
-                scale_b=self.b_pool.B_scales,
+                A_scales=A_scales,
+                B_scales=self.b_pool.B_scales,
                 out_dtype=torch.bfloat16,
-                layer=None,
+                matmul_config=self._matmul_config,
+                settings=get_async_manager()._conf,
+                b_cache=self.b_cache,
                 submit_block=True,
             )
         except Exception as e:
-            logger.error(f"pearl_gemm_noisy failed: {e}", exc_info=True)
+            logger.error(f"pearl_gemm_noisy_cached failed: {e}", exc_info=True)
             time.sleep(0.5)
             return
+
+        if self.b_cache is not None:
+            callback_meta["b_cache_hit"] = b_cache_hit
 
         self.tracker.record_launch(callback_meta, A, A_scales)
         self._launch_count += 1
