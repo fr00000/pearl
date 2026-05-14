@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 def _cleanup_unscheduled_slot(
     *,
-    kernel_launched: bool,
+    gpu_work_queued: bool,
     completion_event,
     host_signal_header_pinned,
     release_pinned_header: Callable[[object], None],
@@ -62,14 +62,28 @@ def _cleanup_unscheduled_slot(
     """Outer-finally cleanup for paths that did not transfer slot
     ownership to a scheduled callback.
 
+    GPU-work scope: stream_prep starts writing slot tensors (slot.A,
+    slot.A_tensor_hash, slot.commitment_hash_A, ...) BEFORE the main
+    noisy_gemm kernel launches. Use "any slot tensor enqueued on a
+    stream" as the gate, NOT "main kernel launched" — the v4 mistake
+    missed the stream_prep window. gpu_work_queued must be set True
+    before the first stream context that touches a slot tensor.
+
     Order matters:
-      1. If the main kernel was launched, synchronize before touching
-         any of its inputs/outputs. Try completion_event first, then
-         torch.cuda.synchronize() as a fallback. If both fail, raise —
-         we cannot prove the GPU is idle, so releasing the slot would
-         risk corrupting slot.A while the kernel is still writing it.
-      2. Only after sync succeeds: release the pinned header (still
-         live as the kernel's output buffer; same safety argument).
+      1. If GPU work was queued, synchronize before touching any
+         slot tensors. Two paths:
+           - completion_event exists (main kernel was launched and
+             recorded): try event.synchronize() first. Cheaper than
+             a device-wide sync; covers both streams because
+             stream_main waited on prep_done_event from stream_prep.
+           - completion_event is None (pre-main failure): no event
+             to sync on, fall through to torch.cuda.synchronize().
+         Final fallback in either path: torch.cuda.synchronize(),
+         which waits for all kernels on all streams of this device.
+         If all sync attempts fail, raise — we cannot prove the GPU
+         is idle, so releasing the slot would risk corruption.
+      2. Only after sync succeeds: release the pinned header (live
+         as the kernel's output buffer; same safety argument).
       3. Only after the pinned header is back in the pool: release
          the A slot via on_callback_done.
 
@@ -80,28 +94,43 @@ def _cleanup_unscheduled_slot(
     path. A prematurely released slot can corrupt a winning proof;
     a leaked slot just costs throughput.
     """
-    if kernel_launched and completion_event is not None:
-        try:
-            completion_event.synchronize()
-        except Exception:
-            logger.exception(
-                "completion_event.synchronize() failed; falling back to "
-                "torch.cuda.synchronize() before releasing slot"
-            )
+    if gpu_work_queued:
+        sync_ok = False
+
+        # Prefer event-specific sync when we have one — cheaper than
+        # a device-wide sync, and waits only on the recorded point.
+        if completion_event is not None:
+            try:
+                completion_event.synchronize()
+                sync_ok = True
+            except Exception:
+                logger.exception(
+                    "completion_event.synchronize() failed; "
+                    "falling back to torch.cuda.synchronize()"
+                )
+
+        # Fallback (also the primary path when no completion event
+        # exists yet — pre-main-kernel failure). Waits for all
+        # kernels on all streams of this device, covering both
+        # stream_prep and stream_main regardless of which streams
+        # queued work.
+        if not sync_ok:
             try:
                 import torch
                 torch.cuda.synchronize()
+                sync_ok = True
             except Exception:
                 logger.exception(
-                    "torch.cuda.synchronize() also failed; refusing to "
-                    "release A slot — GPU may still be writing to "
-                    "slot.A. Miner must be restarted."
+                    "torch.cuda.synchronize() failed; "
+                    "refusing to release A slot"
                 )
-                raise RuntimeError(
-                    "Failed to synchronize CUDA work before slot release; "
-                    "refusing to release A slot to avoid tensor corruption. "
-                    "Miner must be restarted via the bootstrap script."
-                )
+
+        if not sync_ok:
+            raise RuntimeError(
+                "Failed to synchronize CUDA work before slot release; "
+                "refusing to release A slot to avoid tensor corruption. "
+                "Miner must be restarted via the bootstrap script."
+            )
 
     if host_signal_header_pinned is not None:
         try:
@@ -176,12 +205,13 @@ def pearl_gemm_noisy_phase_c(
     # owe the release on the error path).
     scheduled_or_owned = False
 
-    # Tracks whether the main kernel has been launched on stream_main.
-    # If True and scheduled_or_owned is False (some post-launch
-    # failure between record() and successful schedule_status_check),
-    # the outer finally must synchronize completion_event before
-    # releasing the slot to avoid reading slot.A mid-write.
-    kernel_launched = False
+    # Tracks whether ANY GPU work that touches slot tensors has been
+    # enqueued. stream_prep writes slot.A / slot.A_tensor_hash /
+    # slot.commitment_hash_A etc. WELL BEFORE the main noisy_gemm
+    # kernel launches, so "kernel launched" is too narrow — the
+    # cleanup helper must synchronize on the wider GPU-work scope
+    # whenever this flag is True.
+    gpu_work_queued = False
 
     # Acquired only if we enter the GPU-work path. Lives in the outer
     # scope so the finally block can release it on failure paths.
@@ -232,6 +262,12 @@ def pearl_gemm_noisy_phase_c(
         # implicit-default-stream sync. On cache miss, stream_main also
         # needs key_tensor for B_tensor_hash; we record an event after the
         # copy and have stream_main wait on it below.
+        #
+        # From this point on, stream_prep is queuing writes to slot
+        # tensors. Any failure before the main completion event is
+        # recorded must still synchronize this work before releasing
+        # the slot — flip the gate now, not after noisy_gemm.
+        gpu_work_queued = True
         with torch.cuda.stream(stream_prep):
             key_tensor = torch.frombuffer(
                 bytearray(hash_key), dtype=torch.uint8
@@ -397,7 +433,6 @@ def pearl_gemm_noisy_phase_c(
 
         completion_event = torch.cuda.Event()
         completion_event.record(stream_main)
-        kernel_launched = True
 
         # Post-launch: populate cache and schedule status-check callback.
         if b_cache is not None and cached is None:
@@ -432,7 +467,7 @@ def pearl_gemm_noisy_phase_c(
             # Async-enabled check already happened in preflight at
             # function entry. schedule_status_check could still raise
             # for other internal reasons; outer finally handles cleanup
-            # via the kernel_launched + scheduled_or_owned flags.
+            # via the gpu_work_queued + scheduled_or_owned flags.
             get_async_manager().schedule_status_check(completion_event, wrapped_cb)
             host_signal_header_pinned = None  # owned by callback
             # Ownership of on_callback_done has been transferred to the
@@ -451,7 +486,7 @@ def pearl_gemm_noisy_phase_c(
             # deliberately do NOT release the slot (or pinned header).
             # Leak is the correct behavior — see helper docstring.
             _cleanup_unscheduled_slot(
-                kernel_launched=kernel_launched,
+                gpu_work_queued=gpu_work_queued,
                 completion_event=completion_event,
                 host_signal_header_pinned=host_signal_header_pinned,
                 release_pinned_header=lambda h: get_pinned_pool().release(h),

@@ -47,7 +47,7 @@ def test_cleanup_synchronizes_before_slot_release():
     on_callback_done = MagicMock(side_effect=lambda: call_order.append("slot"))
 
     _cleanup_unscheduled_slot(
-        kernel_launched=True,
+        gpu_work_queued=True,
         completion_event=fake_event,
         host_signal_header_pinned=object(),  # sentinel
         release_pinned_header=release_pinned,
@@ -78,7 +78,7 @@ def test_cleanup_sync_failure_does_not_release_slot():
     with patch("torch.cuda.synchronize", side_effect=RuntimeError("driver dead")):
         with pytest.raises(RuntimeError, match="refusing to release A slot"):
             _cleanup_unscheduled_slot(
-                kernel_launched=True,
+                gpu_work_queued=True,
                 completion_event=fake_event,
                 host_signal_header_pinned=object(),
                 release_pinned_header=release_pinned,
@@ -101,7 +101,7 @@ def test_cleanup_pinned_released_after_sync_success():
     on_callback_done = MagicMock()
 
     _cleanup_unscheduled_slot(
-        kernel_launched=True,
+        gpu_work_queued=True,
         completion_event=fake_event,
         host_signal_header_pinned=pinned_sentinel,
         release_pinned_header=release_pinned,
@@ -129,7 +129,7 @@ def test_cleanup_falls_back_to_torch_cuda_synchronize():
     # Fallback succeeds.
     with patch("torch.cuda.synchronize") as fallback_sync:
         _cleanup_unscheduled_slot(
-            kernel_launched=True,
+            gpu_work_queued=True,
             completion_event=fake_event,
             host_signal_header_pinned=object(),
             release_pinned_header=release_pinned,
@@ -142,9 +142,11 @@ def test_cleanup_falls_back_to_torch_cuda_synchronize():
     on_callback_done.assert_called_once_with()
 
 
-def test_cleanup_no_sync_when_kernel_not_launched():
-    """If the kernel never launched, no synchronization is needed.
-    Pinned header release and slot release still fire."""
+def test_cleanup_no_sync_when_no_gpu_work_queued():
+    """If no GPU work touched slot tensors, no synchronization is
+    needed. "No GPU work" is a stricter property than "kernel not
+    launched" (v4 confused them) — gpu_work_queued covers stream_prep
+    writes that happen before noisy_gemm."""
 
     from direct_miner.mining_call import _cleanup_unscheduled_slot
 
@@ -153,7 +155,7 @@ def test_cleanup_no_sync_when_kernel_not_launched():
     on_callback_done = MagicMock()
 
     _cleanup_unscheduled_slot(
-        kernel_launched=False,
+        gpu_work_queued=False,
         completion_event=fake_event,
         host_signal_header_pinned=object(),
         release_pinned_header=release_pinned,
@@ -165,6 +167,58 @@ def test_cleanup_no_sync_when_kernel_not_launched():
     on_callback_done.assert_called_once()
 
 
+def test_cleanup_pre_main_failure_uses_torch_cuda_synchronize():
+    """If stream_prep queued slot-tensor writes but the main kernel
+    never launched (e.g., failure between A-prep and noisy_gemm),
+    completion_event is None and we MUST fall back to
+    torch.cuda.synchronize() to wait on stream_prep before slot
+    release. Forgetting this is the bug v4 still had: gpu_work_queued
+    was tracked too narrowly as "kernel_launched"."""
+
+    from direct_miner.mining_call import _cleanup_unscheduled_slot
+
+    release_pinned = MagicMock()
+    on_callback_done = MagicMock()
+
+    with patch("torch.cuda.synchronize") as fallback_sync:
+        _cleanup_unscheduled_slot(
+            gpu_work_queued=True,
+            completion_event=None,  # main kernel didn't launch
+            host_signal_header_pinned=object(),
+            release_pinned_header=release_pinned,
+            on_callback_done=on_callback_done,
+        )
+        fallback_sync.assert_called_once_with()
+
+    # Sync succeeded via fallback → release proceeds normally.
+    release_pinned.assert_called_once()
+    on_callback_done.assert_called_once_with()
+
+
+def test_cleanup_pre_main_sync_failure_does_not_release_slot():
+    """The fail-closed contract holds for the pre-main path too:
+    if gpu_work_queued is True but torch.cuda.synchronize() raises
+    (and there's no event to retry), cleanup must refuse to release."""
+
+    from direct_miner.mining_call import _cleanup_unscheduled_slot
+
+    release_pinned = MagicMock()
+    on_callback_done = MagicMock()
+
+    with patch("torch.cuda.synchronize", side_effect=RuntimeError("driver dead")):
+        with pytest.raises(RuntimeError, match="refusing to release A slot"):
+            _cleanup_unscheduled_slot(
+                gpu_work_queued=True,
+                completion_event=None,
+                host_signal_header_pinned=object(),
+                release_pinned_header=release_pinned,
+                on_callback_done=on_callback_done,
+            )
+
+    release_pinned.assert_not_called()
+    on_callback_done.assert_not_called()
+
+
 def test_cleanup_handles_none_pinned_and_none_callback():
     """If neither pinned header nor callback was set, cleanup is a
     no-op (apart from sync). Defensive against partial initialization."""
@@ -174,7 +228,7 @@ def test_cleanup_handles_none_pinned_and_none_callback():
     release_pinned = MagicMock()
 
     _cleanup_unscheduled_slot(
-        kernel_launched=False,
+        gpu_work_queued=False,
         completion_event=None,
         host_signal_header_pinned=None,
         release_pinned_header=release_pinned,
