@@ -87,3 +87,37 @@ The profiling report predicted that up to 222 µs of A-side prep could overlap w
 ## Verdict
 
 **Phase C: validated win.** +8.3% sustained throughput over Phase B, zero correctness incidents across 3.5 M iterations. Below the most-optimistic profiling prediction but above the "worth keeping" threshold (≥5%). The architecture (two non-default streams, per-iter slot pool, cross-stream event barriers, optional external-event tracker) is now in place and unlocks the larger wins from `--no-diagnostics` and higher `max_in_flight` that follow.
+
+## Production-tuning follow-ups
+
+After Phase C was validated above, two of the recommended follow-ups were tested in short production-mode runs (`--no-diagnostics --enable-b-cache`, MINER_DEBUG=true on the host for correctness coverage). Same hardware, same shapes.
+
+| Run | max_in_flight | Duration | matmul/s | tile/s | Cache hits / miss / inval | Errors | Δ vs prev |
+|---|---:|---:|---:|---:|---|---:|---:|
+| Phase C baseline (diag on, 1 h) | 2 | 3605.8 s | 970.3 | 993,610 | 3,498,735 / 42 / 41 | 0 | — |
+| `--no-diagnostics`, mif=4 | 4 | 940.3 s (~15 min) | **1577.7** | 1,615,530 | 1,483,455 / 11 / 10 | 0 | **1.626× over baseline** |
+| `--no-diagnostics`, mif=8 | 8 | 330.0 s (~5 min) | **1587.1** | 1,625,165 | 523,653 / 4 / 3 | 0 | **1.006× over mif=4** |
+
+Cumulative win over the Phase A + diagnostics baseline (713.8 mm/s) is now **2.22×**. Cumulative win over the bare Phase A baseline (~905 mm/s) is **1.75×**.
+
+### What the two follow-ups tell us
+
+- **`--no-diagnostics` removes ~20 % of fixed CPU tax per matmul.** This was predicted from PROFILING_RESULTS.md and confirmed: 970.3 → 1577.7 with diagnostics off and a deeper pipeline. The two changes combine multiplicatively, so the marginal contribution of just turning diagnostics off (holding mif fixed) is somewhere in the ~15–20 % band — the rest of the 1.626× comes from mif=4.
+
+- **mif=4 fills the pipeline.** With mif=2 (Phase C baseline), the prep stream had to wait on its own previous iteration as often as on the kernel. mif=4 lets stream_prep run ahead two iterations, fully hiding A-side prep behind the main kernel.
+
+- **mif=8 is wasted memory.** +0.6 % over mif=4 is within noise. The bottleneck is now the `hopper_gemm_ws` kernel itself (~425 µs/launch from the nsys profile). Deeper in-flight depth would only help if the kernel had idle gaps, which it no longer does. mif=4 is the sweet spot at these shapes; the slot-pool memory cost (4 × 95 MB = 380 MB) is small enough to be a non-concern.
+
+- **Cache hit rate stayed at 99.999 % at higher throughput** — the cache is unaffected by pipeline depth; one miss per template invalidation, same as Phase B.
+
+- **Zero errors in both runs.** Phase C's stream-ordering changes hold up under deeper pipelining. The slot pool's round-robin allocator and `CompletionTracker`'s max_in_flight cap together guarantee a slot is never reused while a kernel still references it, regardless of pipeline depth.
+
+### What still won't move the number
+
+At this point we are kernel-bound on `hopper_gemm_ws` (~425 µs per call ⇒ ~2350 mm/s theoretical ceiling on a single stream, with the rest of the iteration filling the gap). To go meaningfully above ~1600 mm/s on this hardware:
+
+- **Multi-GPU.** Same code, one process per GPU, embarrassingly parallel. The natural next phase.
+- **Kernel-internal changes.** A fused noising-A + GEMM kernel, or measurable SM-occupancy headroom from ncu (currently blocked by `ERR_NVGPUCTRPERM`). Both are non-trivial and out of scope without unblocked profiling access.
+- **Different shapes.** Larger m/n/k would amortize the per-call overhead but doesn't help if we're hash-rate / proof-rate bound.
+
+The recommendation is to ship `--no-diagnostics --enable-b-cache --max-in-flight 4` as the production default and pursue multi-GPU as the next phase.
