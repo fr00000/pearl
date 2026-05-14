@@ -229,7 +229,7 @@ log "Step 5: builds (first run: 15-30 min for CUDA kernels)"
 
 if ! is_done "build_python"; then
     log "  Python deps + CUDA kernels via uv sync..."
-    uv sync 2>&1 | tee "$LOG_DIR/uv-sync.log" | tail -8
+    uv sync --all-packages 2>&1 | tee "$LOG_DIR/uv-sync.log" | tail -8
     uv run python -c "import direct_miner, pearl_gemm, pearl_gateway; print('Python imports OK')" \
         || die "Python imports failed after uv sync; see $LOG_DIR/uv-sync.log"
     mark_done "build_python"
