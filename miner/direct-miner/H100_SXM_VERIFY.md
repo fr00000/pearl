@@ -61,3 +61,18 @@ The H200's wider 4.8 TB/s HBM bus (vs H100's 3.4 TB/s) doesn't separate the two 
 - 5-min samples have ~±2-3 % variance. The 1.5 % spread between stress_n128 and stress_n256 is at the edge of resolvable. Either is a defensible operational choice if stress_n256 ever runs into a memory wall (e.g., when more processes share the GPU).
 - This was on a single H100 SXM with no other GPU contention. Multi-tenant pods may differ.
 - pearld was fully synced; mining was against live templates (gateway saw a single template through cell 1, four rotations through cells 2 and 3).
+
+## Addendum: kernel hard ceiling
+
+After the 3 cells above, we tested whether pushing further to n=524 288 (`stress_n512`, 8192 × 524288 × 8192, mif=4) yielded more. It does not:
+
+```
+CUDA error: invalid configuration argument at
+miner/pearl-gemm/csrc/tensor_hash/tensor_hash_host.hpp:72
+```
+
+The failing launch is the `MerkleTreeRootsKernel` inside `tensor_hash`. At n × k = 524288 × 8192 = 4 GB the kernel's computed grid shape exceeds CUDA's max grid dimension (likely 2³¹−1 in x). Memory was *not* the constraint — the launch never succeeded, so allocation was never attempted. The miner ran for 5 min with `completed=0` and `errors=1749`.
+
+This is a kernel-side ceiling, not a hardware one. `stress_n1024` (n=1 048 576) would fail identically and was skipped. To exceed the stress_n256 throughput would require modifying `MerkleTreeRootsKernel::get_grid_shape` to chunk larger inputs across multiple launches or use a different block sizing — an opt/direct-mining change that's out of scope here.
+
+**Practical conclusion: stress_n256 is the maximum usable shape on the current kernel. Larger n is blocked by a launch-config constraint, not hardware.**
