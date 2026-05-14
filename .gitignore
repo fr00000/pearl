@@ -183,6 +183,9 @@ simnet_data
 .cursor
 .aider*
 
+# Claude Code local state (settings, memory, transcripts)
+.claude/
+
 # Library .lock file
 miner/blake3-utils/*.lock
 
