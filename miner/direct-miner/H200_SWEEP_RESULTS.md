@@ -102,3 +102,83 @@ Note: mif=4 produces statistically equivalent throughput (2,036,430 t/s) at lowe
   but the sweep already ran 4-up so contention is partially baked in
 - Block production is governed by network share and target difficulty — high tile rate doesn't
   guarantee blocks won
+
+---
+
+# Stress Sweep Addendum
+
+## Motivation
+The initial H200 sweep showed tile rate plateauing at ~2M tiles/sec/GPU across all five shapes. This addendum pushes the boundaries — `n` up to 262144, `m` up to 32768, and `max_in_flight` up to 16 — to determine whether the plateau is a hard kernel-throughput limit or whether further gains are available with bigger workloads.
+
+## Method
+- 8 stress cells × 5 min each, parallel 4-up across all 4 GPUs (2 batches)
+- Wall time: ~12 minutes
+- Production mode (`--enable-b-cache`, diagnostics off)
+- All cells share one pearl-gateway socket — matches prod conditions and initial-sweep methodology
+- Memory poller (`nvidia-smi`, 5-second cadence) captured peak GPU memory per cell
+
+## Pre-flight outcomes
+- All 3 highest-risk cells passed 30-second pre-flight (stress_n256, stress_m32, mif16_max). No cells excluded.
+
+## Cells (sorted by tile rate)
+
+| Cell              | m     | n      | k    | mif | tiles/mm | mm/s   | tiles/s     | peak    | err |
+|-------------------|-------|--------|------|-----|----------|--------|-------------|---------|-----|
+| **stress_n256**   | 8192  | 262144 | 8192 | 4   | 65536    | 32.4   | **2,123,968** | 24.2 GB | 0   |
+| stress_n128       | 8192  | 131072 | 8192 | 4   | 32768    | 64.4   | 2,108,646   | 12.9 GB | 0   |
+| stress_max        | 16384 | 131072 | 8192 | 4   | 65536    | 31.9   | 2,088,658   | 20.9 GB | 0   |
+| stress_n128_mif8  | 8192  | 131072 | 8192 | 8   | 32768    | 63.6   | 2,085,186   | 21.1 GB | 0   |
+| stress_both       | 16384 | 65536  | 8192 | 4   | 32768    | 63.4   | 2,075,854   | 11.3 GB | 0   |
+| mif16_xl          | 8192  | 65536  | 8192 | 16  | 16384    | 126.0  | 2,063,717   | 20.6 GB | 0   |
+| mif16_max         | 16384 | 65536  | 8192 | 16  | 32768    | 62.5   | 2,047,023*  | 38.7 GB | 0   |
+| stress_m32        | 32768 | 16384  | 8192 | 4   | 16384    | 112.5  | 1,843,139   | 7.2 GB  | 0   |
+
+\* `mif16_max` data is from its last in-flight log line, not the FINAL line: SIGINT from the timeout interrupted the drain `synchronize()` call before FINAL printed. The run itself was clean (18,200 matmuls completed at a steady 2,047k tile/s in the 5 minutes before SIGINT) and the rate is mid-run-average, comparable to other cells.
+
+## mif scaling at fixed shape (s_xl: 8192×65536×8192)
+
+| mif | tile/s        | Δ vs mif=8 |
+|-----|---------------|------------|
+| 2   | 2,036,040     | -0.2%      |
+| 4   | 2,036,430     | -0.1%      |
+| 8   | 2,039,397     | (baseline) |
+| 16  | 2,063,717     | +1.2%      |
+
+**Pipeline saturated.** mif=16 is within run-to-run noise (±2%) of mif=8. Doubling pipeline depth past 8 does not help on this kernel.
+
+## Cross-cell pattern
+All "wider-n" cells (stress_n128 / stress_n128_mif8 / stress_n256 / stress_max / stress_both) cluster between **2.07M and 2.13M tiles/s** — a 3% spread. The +4.1% over the prior winner is consistent across this group, not a single outlier. So the gain is real but small.
+
+The exception is **stress_m32** (large m=32768, narrow n=16384) at 1.84M — ~10% worse than every wider-n cell. Large m + narrow n is not a productive combination for this kernel.
+
+## Peak memory observations
+- Largest cell (mif16_max): 38.7 GB / 143 GB → 104 GB headroom
+- Predicted ~112 GB for mif16_max in the spec was 3× too high; actual is 39 GB
+- Memory is not a binding constraint at any tested shape
+- 100+ GB of HBM3e per GPU is unused at every tested workload
+
+## Verdict
+**Marginal gain (+4.1%).** stress_n256 beats prior winner. The gain is real (multiple wider-n cells cluster at 2.08–2.12M) but small. Cost of adoption is trivial: same m and k, same `max_in_flight`, 4× wider n, 7 GB extra memory.
+
+`max_in_flight=16` brings nothing. Pipeline depth past 8 is wasted.
+
+## Updated production config
+
+```
+m            = 8192
+n            = 262144     ← was 65536
+k            = 8192
+max_in_flight = 4         ← was 8 (statistically indistinguishable from 4)
+flags        = --enable-b-cache
+```
+
+- Per-GPU rate: **32.4 mm/s, 2,123,968 tiles/s** (+4.1% over prior)
+- 4-GPU projected aggregate: **129.6 mm/s, 8,495,872 tiles/s**
+- Peak memory: ~24 GB per GPU (well within 143 GB)
+
+Note: matmul rate (mm/s) is 4× lower than at the prior winner shape because each matmul covers 4× more tiles. The optimization target is tile rate; matmul rate is a derived counter.
+
+## Caveats
+- 5-min runs have ±2-3% variance; cells within 3% of each other are statistically tied
+- The 4% bump is at the edge of where I'd want a longer (30-min) verification before adopting in production — recommend a brief replicated re-run at this shape before declaring it the new baseline
+- The kernel is compute-bound at ~2M tiles/sec/GPU on H200 — further bandwidth or memory expansion is unlikely to help. Future gains will come from kernel work, not shape tuning.
