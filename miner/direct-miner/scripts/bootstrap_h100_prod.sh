@@ -230,6 +230,10 @@ log "Step 5: builds (first run: 15-30 min for CUDA kernels)"
 if ! is_done "build_python"; then
     log "  Python deps + CUDA kernels via uv sync..."
     uv sync --all-packages 2>&1 | tee "$LOG_DIR/uv-sync.log" | tail -8
+    # Re-source env.sh: on a fresh install the nvidia/torch dirs didn't exist
+    # before sync, so the earlier source-at-line-225 silently no-op'd. Without
+    # LD_LIBRARY_PATH the import below fails with `libc10.so: cannot open`.
+    [[ -f "$REPO_DIR/env.sh" ]] && source "$REPO_DIR/env.sh"
     uv run python -c "import direct_miner, pearl_gemm, pearl_gateway; print('Python imports OK')" \
         || die "Python imports failed after uv sync; see $LOG_DIR/uv-sync.log"
     mark_done "build_python"
@@ -334,8 +338,10 @@ SYNC_START=$(date +%s)
 last_logged_blocks=-1
 peer_warning_emitted=0
 while true; do
-    BLOCKS=$("${PRLCTL_BASE[@]}" getblockcount 2>/dev/null || echo "0")
-    HEADERS=$("${PRLCTL_BASE[@]}" getblockchaininfo 2>/dev/null | jq -r '.headers // 0' 2>/dev/null || echo "0")
+    CHAIN_INFO=$("${PRLCTL_BASE[@]}" getblockchaininfo 2>/dev/null || echo "{}")
+    BLOCKS=$(echo "$CHAIN_INFO" | jq -r '.blocks // 0' 2>/dev/null || echo "0")
+    HEADERS=$(echo "$CHAIN_INFO" | jq -r '.headers // 0' 2>/dev/null || echo "0")
+    MEDIAN_TIME=$(echo "$CHAIN_INFO" | jq -r '.mediantime // 0' 2>/dev/null || echo "0")
     PEERS=$("${PRLCTL_BASE[@]}" getpeerinfo 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
 
     if [[ "$BLOCKS" == "0" ]] && [[ "$HEADERS" == "0" ]]; then
@@ -344,7 +350,9 @@ while true; do
         continue
     fi
 
-    ELAPSED=$(($(date +%s) - SYNC_START))
+    NOW=$(date +%s)
+    ELAPSED=$((NOW - SYNC_START))
+    TIP_AGE=$((NOW - MEDIAN_TIME))
 
     if [[ "$PEERS" == "0" ]] && (( ELAPSED > 300 )) && [[ "$peer_warning_emitted" == "0" ]]; then
         err "  Peer count still 0 after 5 min — discovery may be failing"
@@ -356,12 +364,17 @@ while true; do
 
     GAP=$((HEADERS - BLOCKS))
     if [[ "$BLOCKS" != "$last_logged_blocks" ]] || (( ELAPSED % 60 < 30 )); then
-        log "  blocks=$BLOCKS headers=$HEADERS gap=$GAP peers=$PEERS elapsed=${ELAPSED}s"
+        log "  blocks=$BLOCKS headers=$HEADERS gap=$GAP peers=$PEERS tip_age=${TIP_AGE}s elapsed=${ELAPSED}s"
         last_logged_blocks=$BLOCKS
     fi
 
-    if (( GAP < 100 )) && [[ "$BLOCKS" != "0" ]]; then
-        log "pearld synced (gap=$GAP blocks; took ${ELAPSED}s)"
+    # Both conditions required: gap<100 alone is a false positive — on cold
+    # start the first peer feeds a small batch of headers (e.g. 765) and
+    # pearld processes them in seconds, hitting gap=0 before later peers
+    # advertise the full chain. tip_age<1800s confirms we're actually near
+    # the network tip, not just caught up to one peer's view.
+    if (( GAP < 100 )) && [[ "$BLOCKS" != "0" ]] && (( TIP_AGE < 1800 )); then
+        log "pearld synced (gap=$GAP blocks, tip_age=${TIP_AGE}s; took ${ELAPSED}s)"
         break
     fi
 
