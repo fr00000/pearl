@@ -2,13 +2,16 @@
 
 Each in-flight iteration gets its own slot of A-side intermediates so
 iter N's tensors aren't overwritten while iter N+1 prepares on the
-other stream. Slot count = max_in_flight; CompletionTracker enforces
-the cap, so round-robin slot pickup is always safe.
+other stream. Slot count = max_in_flight; CompletionTracker bounds
+launched work, and per-slot Events ensure async callbacks have
+released their tensor references before slot reuse.
 
 Tensors are allocated once at startup and reused across the session.
 """
 
 import logging
+import threading
+import time
 from dataclasses import dataclass
 from typing import List
 
@@ -43,7 +46,17 @@ class ASlot:
 
 
 class ASlotPool:
-    """Round-robin allocator over num_slots pre-built ASlot objects."""
+    """Round-robin allocator over num_slots pre-built ASlot objects.
+
+    Slot reuse is gated on two conditions:
+    1. CompletionTracker has reaped the previous CUDA event (kernel done)
+    2. Any async callback holding refs to this slot has called release()
+
+    Without (2), the win-path StatusCheckCallback could read slot.A
+    while the next iteration's kernel is mid-write — corrupt proof
+    submission. release() is invoked by the _SlotReleasingCallback
+    wrapper in mining_call.py.
+    """
 
     def __init__(
         self,
@@ -86,7 +99,18 @@ class ASlotPool:
             )
             self.slots.append(slot)
 
-        torch.cuda.synchronize()
+        # Per-slot lifetime gate. Initially set (slots are free); cleared
+        # by acquire(), set by release(). Release is the responsibility
+        # of whoever last touched the slot's tensors — typically the
+        # _SlotReleasingCallback wrapper in mining_call.py.
+        self._callback_done: List[threading.Event] = [
+            threading.Event() for _ in range(num_slots)
+        ]
+        for ev in self._callback_done:
+            ev.set()
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
 
         per_slot_bytes = (
             m * k * 1                              # A int8
@@ -108,9 +132,59 @@ class ASlotPool:
             f"{per_slot_bytes / 1024 / 1024:.1f} MB = {total_mb:.1f} MB"
         )
 
-    def acquire(self) -> tuple[int, ASlot]:
-        """Return (slot_idx, slot). Caller resets per-iter state as needed."""
+    def acquire(self, timeout: float = 30.0) -> tuple[int, ASlot]:
+        """Return (slot_idx, slot). Blocks until the slot's previous
+        async callback (if any) has released it.
+
+        timeout: max seconds to wait before logging and proceeding.
+        Default 30s is generous; normal release latency is <10ms (async
+        event poll interval). A real block here indicates a stuck
+        callback — log loudly and proceed to avoid permanent deadlock.
+        """
         slot_idx = self._next_slot
+        if not self._callback_done[slot_idx].wait(timeout=timeout):
+            logger.error(
+                f"Slot {slot_idx} acquire timed out after {timeout}s — "
+                "callback for previous iteration may be stuck. "
+                "Proceeding anyway to avoid deadlock; THIS RISKS TENSOR CORRUPTION."
+            )
+            # Force-clear to prevent permanent deadlock; the warning
+            # surfaces the underlying issue.
+            self._callback_done[slot_idx].set()
+
+        self._callback_done[slot_idx].clear()
         slot = self.slots[slot_idx]
         self._next_slot = (self._next_slot + 1) % self.num_slots
         return slot_idx, slot
+
+    def release(self, slot_idx: int) -> None:
+        """Mark slot as no longer in use by async callbacks.
+
+        Must be called exactly once per acquire(), typically via the
+        _SlotReleasingCallback wrapper's finally block in
+        mining_call.py. Safe to call on an already-released slot
+        (Event.set() is idempotent).
+        """
+        if 0 <= slot_idx < self.num_slots:
+            self._callback_done[slot_idx].set()
+        else:
+            logger.error(f"release() called with invalid slot_idx={slot_idx}")
+
+    def wait_all_released(self, timeout: float = 30.0) -> bool:
+        """Block until every slot has been released or timeout expires.
+
+        Returns True if all slots released within the timeout, False if
+        any slot was still held when the deadline passed. Used by the
+        shutdown drain path so pending callbacks can finish their
+        win-path work before we tear down the process.
+        """
+        deadline = time.monotonic() + timeout
+        for slot_idx, ev in enumerate(self._callback_done):
+            remaining = max(0.0, deadline - time.monotonic())
+            if not ev.wait(timeout=remaining):
+                logger.warning(
+                    f"Slot {slot_idx} callback did not complete within "
+                    f"{timeout}s shutdown deadline"
+                )
+                return False
+        return True

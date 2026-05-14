@@ -188,6 +188,11 @@ class DirectMiner:
         except KeyboardInterrupt:
             logger.info("Interrupted; draining in-flight work...")
             self.tracker.drain()
+            # Async callbacks (StatusCheckCallback) may still hold refs
+            # to slot.A / slot.commitment_hash_A — let them finish any
+            # win-path work before we tear down.
+            logger.info("Waiting for async callbacks to release slots...")
+            self.a_pool.wait_all_released(timeout=30.0)
             self._log_final_stats()
             if self.diagnostics is not None:
                 self.diagnostics.close()
@@ -248,6 +253,11 @@ class DirectMiner:
         callback_meta["b_cache_hit"] = None
         callback_meta["slot_idx"] = slot_idx
 
+        # Bind slot_idx into a release callable. Default-arg captures
+        # by value so each lambda owns its own slot_idx — closing over
+        # the live `slot_idx` variable would race the next iteration.
+        release_this_slot = lambda idx=slot_idx: self.a_pool.release(idx)
+
         try:
             _C, b_cache_hit, completion_event = pearl_gemm_noisy_phase_c(
                 slot=slot,
@@ -260,22 +270,24 @@ class DirectMiner:
                 stream_prep=self.stream_prep,
                 a_generator=generator,
                 submit_block=True,
+                on_callback_done=release_this_slot,
             )
         except Exception as e:
             logger.error(
                 f"pearl_gemm_noisy_phase_c failed: {e}", exc_info=True
             )
+            # pearl_gemm_noisy_phase_c's outer finally already released
+            # the slot on its error path; do not double-release.
             time.sleep(0.5)
             return
 
         if self.b_cache is not None:
             callback_meta["b_cache_hit"] = b_cache_hit
 
-        # The slot's tensors are owned by ASlotPool and protected from
-        # reuse by max_in_flight; we pass no per-iteration tensor refs
-        # to the tracker. Use the stream_main-recorded completion_event
-        # so the on_complete callback fires when the kernel actually
-        # finishes (not when this function returned on the host).
+        # Slot lifetime is now tracked by ASlotPool via the per-slot
+        # Event (release fires from the callback's finally block). The
+        # CUDA event below tracks GPU completion for throughput and
+        # launch backpressure — both gates must clear before slot reuse.
         self.tracker.record_launch(callback_meta, event=completion_event)
         self._launch_count += 1
 

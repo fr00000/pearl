@@ -28,7 +28,7 @@ the main kernel actually finishes, not when this function returns.
 """
 
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 from miner_base.commitment_hash import CommitmentHasher
@@ -51,6 +51,37 @@ from .synthetic_data import make_synthetic_a_into
 logger = logging.getLogger(__name__)
 
 
+class _SlotReleasingCallback:
+    """Wraps StatusCheckCallback so the A-slot is released even if the
+    callback raises. The slot must stay owned until any win-path work
+    (proof construction, .cpu() copies, submission) is complete; this
+    wrapper invokes the release callable in a finally block.
+    """
+
+    __slots__ = ("_inner", "_release_slot", "_released")
+
+    def __init__(
+        self,
+        inner: StatusCheckCallback,
+        release_slot: Callable[[], None],
+    ):
+        self._inner = inner
+        self._release_slot = release_slot
+        self._released = False
+
+    def __call__(self, handle_submit_block):
+        try:
+            return self._inner(handle_submit_block)
+        finally:
+            # Release exactly once even if __call__ is invoked twice.
+            if not self._released:
+                try:
+                    self._release_slot()
+                except Exception:
+                    logger.exception("Slot release failed")
+                self._released = True
+
+
 def pearl_gemm_noisy_phase_c(
     slot: ASlot,
     B: torch.Tensor,
@@ -62,228 +93,262 @@ def pearl_gemm_noisy_phase_c(
     stream_prep: torch.cuda.Stream,
     a_generator: Optional[torch.Generator] = None,
     submit_block: bool = True,
+    on_callback_done: Optional[Callable[[], None]] = None,
 ) -> tuple[torch.Tensor, bool, torch.cuda.Event]:
-    m, k = slot.A.shape
-    n = B.shape[0]
-    r = settings.noise_rank
-    device = slot.A.device
+    """Phase C multi-stream cached call.
 
-    mining_job: MiningJob = get_async_manager().get_mining_job()
-    mining_config = matmul_config.mining_config
-    adjusted_target = mining_job.adjust_target(mining_config=mining_config)
+    on_callback_done: if provided, MUST be called exactly once per call
+    to this function. It is invoked from the async callback's finally
+    block after any win-path work completes. If we fail before
+    scheduling the callback (early error, submit_block=False), this
+    function invokes it directly via the outer finally to release the
+    slot — exactly one release path runs.
+    """
+    # Tracks whether ownership of on_callback_done has been
+    # transferred to a scheduled callback (or whether we still
+    # owe the release on the error path).
+    scheduled_or_owned = False
 
-    hash_key = CommitmentHasher.get_key(
-        mining_job.incomplete_header_bytes, mining_config
-    )
+    try:
+        m, k = slot.A.shape
+        n = B.shape[0]
+        r = settings.noise_rank
+        device = slot.A.device
 
-    cached: Optional[BSideArtifacts] = (
-        b_cache.get(hash_key) if b_cache is not None else None
-    )
-    b_cache_hit = cached is not None
+        mining_job: MiningJob = get_async_manager().get_mining_job()
+        mining_config = matmul_config.mining_config
+        adjusted_target = mining_job.adjust_target(mining_config=mining_config)
 
-    # ===== A-side prep on stream_prep =====
-    # The H2D copy of key_tensor happens inside stream_prep so the
-    # tensor_hash on stream_prep sees the populated buffer without an
-    # implicit-default-stream sync. On cache miss, stream_main also
-    # needs key_tensor for B_tensor_hash; we record an event after the
-    # copy and have stream_main wait on it below.
-    with torch.cuda.stream(stream_prep):
-        key_tensor = torch.frombuffer(
-            bytearray(hash_key), dtype=torch.uint8
-        ).to(device, non_blocking=True)
-
-        # Record event after key_tensor copy so stream_main (cache-miss
-        # path) can sync against it without serialising on stream_prep
-        # work that comes after.
-        key_ready_event = torch.cuda.Event()
-        key_ready_event.record(stream_prep)
-
-        make_synthetic_a_into(
-            slot.A, slot.A_scales, generator=a_generator
+        hash_key = CommitmentHasher.get_key(
+            mining_job.incomplete_header_bytes, mining_config
         )
 
-        # A.view(uint8) is byte-identical to .to(uint8) (-64→192 etc),
-        # confirmed before writing this code. Skipping the copy saves
-        # the 56 µs direct_copy_kernel_cuda that showed up at 8.2%
-        # of GPU time in the Phase B nsys profile.
-        tensor_hash(
-            slot.A.view(torch.uint8),
-            key_tensor,
-            slot.A_tensor_hash,
-            slot.tensor_hash_scratchpad,
+        cached: Optional[BSideArtifacts] = (
+            b_cache.get(hash_key) if b_cache is not None else None
         )
+        b_cache_hit = cached is not None
 
-    # ===== B-side: cache lookup or compute on stream_main =====
-    if cached is not None:
-        B_tensor_hash = cached.B_tensor_hash
-        commitment_hash_B_tensor = cached.commitment_hash_B
-        EBR = cached.EBR
-        EBR_fp16 = cached.EBR_fp16
-        EBL_R_major = cached.EBL_R_major
-        EBL_K_major = cached.EBL_K_major
-        BpEB = cached.BpEB
-    else:
-        # Cache miss — compute B-side on stream_main. stream_main needs
-        # key_tensor first.
-        stream_main.wait_event(key_ready_event)
-        with torch.cuda.stream(stream_main):
-            B_tensor_hash = torch.empty(
-                32, dtype=torch.uint8, device=device
+        # ===== A-side prep on stream_prep =====
+        # The H2D copy of key_tensor happens inside stream_prep so the
+        # tensor_hash on stream_prep sees the populated buffer without an
+        # implicit-default-stream sync. On cache miss, stream_main also
+        # needs key_tensor for B_tensor_hash; we record an event after the
+        # copy and have stream_main wait on it below.
+        with torch.cuda.stream(stream_prep):
+            key_tensor = torch.frombuffer(
+                bytearray(hash_key), dtype=torch.uint8
+            ).to(device, non_blocking=True)
+
+            # Record event after key_tensor copy so stream_main (cache-miss
+            # path) can sync against it without serialising on stream_prep
+            # work that comes after.
+            key_ready_event = torch.cuda.Event()
+            key_ready_event.record(stream_prep)
+
+            make_synthetic_a_into(
+                slot.A, slot.A_scales, generator=a_generator
             )
+
+            # A.view(uint8) is byte-identical to .to(uint8) (-64→192 etc),
+            # confirmed before writing this code. Skipping the copy saves
+            # the 56 µs direct_copy_kernel_cuda that showed up at 8.2%
+            # of GPU time in the Phase B nsys profile.
             tensor_hash(
-                B.view(torch.uint8),
+                slot.A.view(torch.uint8),
                 key_tensor,
-                B_tensor_hash,
+                slot.A_tensor_hash,
                 slot.tensor_hash_scratchpad,
             )
-            commitment_hash_B_tensor = torch.empty(
-                32, dtype=torch.uint8, device=device
-            )
-            EBR = torch.empty((n, r), dtype=torch.int8, device=device)
-            EBR_fp16 = torch.empty((n, r), dtype=torch.float16, device=device)
-            EBL_R_major = torch.empty((k, r), dtype=torch.int8, device=device)
-            EBL_K_major = torch.empty((r, k), dtype=torch.int8, device=device)
-            BpEB = torch.empty((n, k), dtype=torch.int8, device=device)
 
-        # stream_prep needs B_tensor_hash before commitment_hash below.
-        b_hash_done = torch.cuda.Event()
-        b_hash_done.record(stream_main)
-        stream_prep.wait_event(b_hash_done)
-
-    # commitment_hash + A-side noise on stream_prep
-    with torch.cuda.stream(stream_prep):
+        # ===== B-side: cache lookup or compute on stream_main =====
         if cached is not None:
-            # commitment_hash_from_merkle_roots always writes both A and
-            # B. On a cache hit we already have commitment_hash_B; use a
-            # throwaway for the B output. Cost: blake3 of 64 bytes,
-            # negligible.
-            commitment_hash_B_throwaway = torch.empty(
-                32, dtype=torch.uint8, device=device
-            )
-            commitment_hash_from_merkle_roots(
-                slot.A_tensor_hash,
-                B_tensor_hash,
-                key_tensor,
-                slot.commitment_hash_A,
-                commitment_hash_B_throwaway,
-            )
-            del commitment_hash_B_throwaway
-
-            noise_gen(
-                R=r,
-                EAL=slot.EAL,
-                EAL_fp16=slot.EAL_fp16,
-                EAR_R_major=slot.EAR_R_major,
-                EAR_K_major=slot.EAR_K_major,
-                key_A=slot.commitment_hash_A,
-            )
+            B_tensor_hash = cached.B_tensor_hash
+            commitment_hash_B_tensor = cached.commitment_hash_B
+            EBR = cached.EBR
+            EBR_fp16 = cached.EBR_fp16
+            EBL_R_major = cached.EBL_R_major
+            EBL_K_major = cached.EBL_K_major
+            BpEB = cached.BpEB
         else:
-            commitment_hash_from_merkle_roots(
-                slot.A_tensor_hash,
-                B_tensor_hash,
-                key_tensor,
-                slot.commitment_hash_A,
-                commitment_hash_B_tensor,
-            )
+            # Cache miss — compute B-side on stream_main. stream_main needs
+            # key_tensor first.
+            stream_main.wait_event(key_ready_event)
+            with torch.cuda.stream(stream_main):
+                B_tensor_hash = torch.empty(
+                    32, dtype=torch.uint8, device=device
+                )
+                tensor_hash(
+                    B.view(torch.uint8),
+                    key_tensor,
+                    B_tensor_hash,
+                    slot.tensor_hash_scratchpad,
+                )
+                commitment_hash_B_tensor = torch.empty(
+                    32, dtype=torch.uint8, device=device
+                )
+                EBR = torch.empty((n, r), dtype=torch.int8, device=device)
+                EBR_fp16 = torch.empty((n, r), dtype=torch.float16, device=device)
+                EBL_R_major = torch.empty((k, r), dtype=torch.int8, device=device)
+                EBL_K_major = torch.empty((r, k), dtype=torch.int8, device=device)
+                BpEB = torch.empty((n, k), dtype=torch.int8, device=device)
 
-            # Cache miss path: B-side noise factors generated together
-            # with A-side. stream_prep is already in front of
-            # B_tensor_hash via b_hash_done; commitment_hash_B is also
-            # ready by the time noise_gen reads it (same stream).
-            noise_gen(
-                R=r,
+            # stream_prep needs B_tensor_hash before commitment_hash below.
+            b_hash_done = torch.cuda.Event()
+            b_hash_done.record(stream_main)
+            stream_prep.wait_event(b_hash_done)
+
+        # commitment_hash + A-side noise on stream_prep
+        with torch.cuda.stream(stream_prep):
+            if cached is not None:
+                # commitment_hash_from_merkle_roots always writes both A and
+                # B. On a cache hit we already have commitment_hash_B; use a
+                # throwaway for the B output. Cost: blake3 of 64 bytes,
+                # negligible.
+                commitment_hash_B_throwaway = torch.empty(
+                    32, dtype=torch.uint8, device=device
+                )
+                commitment_hash_from_merkle_roots(
+                    slot.A_tensor_hash,
+                    B_tensor_hash,
+                    key_tensor,
+                    slot.commitment_hash_A,
+                    commitment_hash_B_throwaway,
+                )
+                del commitment_hash_B_throwaway
+
+                noise_gen(
+                    R=r,
+                    EAL=slot.EAL,
+                    EAL_fp16=slot.EAL_fp16,
+                    EAR_R_major=slot.EAR_R_major,
+                    EAR_K_major=slot.EAR_K_major,
+                    key_A=slot.commitment_hash_A,
+                )
+            else:
+                commitment_hash_from_merkle_roots(
+                    slot.A_tensor_hash,
+                    B_tensor_hash,
+                    key_tensor,
+                    slot.commitment_hash_A,
+                    commitment_hash_B_tensor,
+                )
+
+                # Cache miss path: B-side noise factors generated together
+                # with A-side. stream_prep is already in front of
+                # B_tensor_hash via b_hash_done; commitment_hash_B is also
+                # ready by the time noise_gen reads it (same stream).
+                noise_gen(
+                    R=r,
+                    EAL=slot.EAL,
+                    EAL_fp16=slot.EAL_fp16,
+                    EAR_R_major=slot.EAR_R_major,
+                    EAR_K_major=slot.EAR_K_major,
+                    EBL_R_major=EBL_R_major,
+                    EBL_K_major=EBL_K_major,
+                    EBR=EBR,
+                    EBR_fp16=EBR_fp16,
+                    key_A=slot.commitment_hash_A,
+                    key_B=commitment_hash_B_tensor,
+                )
+
+        prep_done_event = torch.cuda.Event()
+        prep_done_event.record(stream_prep)
+
+        # ===== Main kernel on stream_main, waits for prep_done =====
+        stream_main.wait_event(prep_done_event)
+
+        host_signal_header_pinned = get_pinned_pool().acquire()
+        pow_target_tensor = make_pow_target_tensor(adjusted_target)
+        run_noising_B = (cached is None)
+
+        with torch.cuda.stream(stream_main):
+            # Slot's host_signal_sync is reused across iterations; reset
+            # before the kernel reads it.
+            slot.host_signal_sync.zero_()
+
+            noisy_gemm(
+                A=slot.A,
+                B=B,
                 EAL=slot.EAL,
                 EAL_fp16=slot.EAL_fp16,
-                EAR_R_major=slot.EAR_R_major,
-                EAR_K_major=slot.EAR_K_major,
-                EBL_R_major=EBL_R_major,
-                EBL_K_major=EBL_K_major,
                 EBR=EBR,
                 EBR_fp16=EBR_fp16,
-                key_A=slot.commitment_hash_A,
-                key_B=commitment_hash_B_tensor,
+                EAR_R_major=slot.EAR_R_major,
+                EBL_R_major=EBL_R_major,
+                EAR_K_major=slot.EAR_K_major,
+                EBL_K_major=EBL_K_major,
+                AxEBL_fp16=slot.A_E_BL,
+                EARxBpEB_fp16=slot.EARxBpEB,
+                ApEA=slot.ApEA,
+                BpEB=BpEB,
+                A_scales=slot.A_scales,
+                B_scales=B_scales,
+                C=slot.C,
+                host_signal_header_pinned=host_signal_header_pinned,
+                host_signal_sync=slot.host_signal_sync,
+                pow_target=pow_target_tensor,
+                pow_key=slot.commitment_hash_A.view(torch.uint32),
+                tile_size_m=settings.tile_size_m,
+                tile_size_n=settings.tile_size_n,
+                tile_size_k=settings.tile_size_k,
+                run_noising_A=True,
+                run_noising_B=run_noising_B,
+                skip_reduction=False,
+                skip_denoising=False,
             )
 
-    prep_done_event = torch.cuda.Event()
-    prep_done_event.record(stream_prep)
+        completion_event = torch.cuda.Event()
+        completion_event.record(stream_main)
 
-    # ===== Main kernel on stream_main, waits for prep_done =====
-    stream_main.wait_event(prep_done_event)
+        # Post-launch: populate cache and schedule status-check callback.
+        if b_cache is not None and cached is None:
+            b_cache.put(
+                hash_key,
+                BSideArtifacts(
+                    B_tensor_hash=B_tensor_hash,
+                    commitment_hash_B=commitment_hash_B_tensor,
+                    EBR=EBR,
+                    EBR_fp16=EBR_fp16,
+                    EBL_R_major=EBL_R_major,
+                    EBL_K_major=EBL_K_major,
+                    BpEB=BpEB,
+                ),
+            )
 
-    host_signal_header_pinned = get_pinned_pool().acquire()
-    pow_target_tensor = make_pow_target_tensor(adjusted_target)
-    run_noising_B = (cached is None)
+        if submit_block:
+            inner_cb = StatusCheckCallback(
+                host_signal_header_pinned=host_signal_header_pinned,
+                commitment_hash_A_tensor=slot.commitment_hash_A,
+                commitment_hash_B_tensor=commitment_hash_B_tensor,
+                A=slot.A,
+                B=B,
+                mining_job=mining_job,
+            )
+            wrapped_cb = (
+                _SlotReleasingCallback(inner_cb, on_callback_done)
+                if on_callback_done is not None
+                else inner_cb
+            )
+            get_async_manager().schedule_status_check(completion_event, wrapped_cb)
+            host_signal_header_pinned = None  # owned by callback
+            # Ownership of on_callback_done has been transferred to the
+            # callback wrapper; outer finally must NOT release.
+            scheduled_or_owned = True
+        else:
+            get_pinned_pool().release(host_signal_header_pinned)
+            del host_signal_header_pinned
+            # No callback scheduled — outer finally releases the slot.
 
-    with torch.cuda.stream(stream_main):
-        # Slot's host_signal_sync is reused across iterations; reset
-        # before the kernel reads it.
-        slot.host_signal_sync.zero_()
+        return slot.C, b_cache_hit, completion_event
 
-        noisy_gemm(
-            A=slot.A,
-            B=B,
-            EAL=slot.EAL,
-            EAL_fp16=slot.EAL_fp16,
-            EBR=EBR,
-            EBR_fp16=EBR_fp16,
-            EAR_R_major=slot.EAR_R_major,
-            EBL_R_major=EBL_R_major,
-            EAR_K_major=slot.EAR_K_major,
-            EBL_K_major=EBL_K_major,
-            AxEBL_fp16=slot.A_E_BL,
-            EARxBpEB_fp16=slot.EARxBpEB,
-            ApEA=slot.ApEA,
-            BpEB=BpEB,
-            A_scales=slot.A_scales,
-            B_scales=B_scales,
-            C=slot.C,
-            host_signal_header_pinned=host_signal_header_pinned,
-            host_signal_sync=slot.host_signal_sync,
-            pow_target=pow_target_tensor,
-            pow_key=slot.commitment_hash_A.view(torch.uint32),
-            tile_size_m=settings.tile_size_m,
-            tile_size_n=settings.tile_size_n,
-            tile_size_k=settings.tile_size_k,
-            run_noising_A=True,
-            run_noising_B=run_noising_B,
-            skip_reduction=False,
-            skip_denoising=False,
-        )
-
-    completion_event = torch.cuda.Event()
-    completion_event.record(stream_main)
-
-    # Post-launch: populate cache and schedule status-check callback.
-    if b_cache is not None and cached is None:
-        b_cache.put(
-            hash_key,
-            BSideArtifacts(
-                B_tensor_hash=B_tensor_hash,
-                commitment_hash_B=commitment_hash_B_tensor,
-                EBR=EBR,
-                EBR_fp16=EBR_fp16,
-                EBL_R_major=EBL_R_major,
-                EBL_K_major=EBL_K_major,
-                BpEB=BpEB,
-            ),
-        )
-
-    if submit_block:
-        callback = StatusCheckCallback(
-            host_signal_header_pinned=host_signal_header_pinned,
-            commitment_hash_A_tensor=slot.commitment_hash_A,
-            commitment_hash_B_tensor=commitment_hash_B_tensor,
-            A=slot.A,
-            B=B,
-            mining_job=mining_job,
-        )
-        get_async_manager().schedule_status_check(completion_event, callback)
-        host_signal_header_pinned = None  # owned by callback
-    else:
-        get_pinned_pool().release(host_signal_header_pinned)
-        del host_signal_header_pinned
-
-    return slot.C, b_cache_hit, completion_event
+    finally:
+        # If we never successfully transferred ownership to a
+        # callback, the slot is still our responsibility.
+        if not scheduled_or_owned and on_callback_done is not None:
+            try:
+                on_callback_done()
+            except Exception:
+                logger.exception("Slot release in outer finally failed")
 
 
 # Legacy single-stream cached call retained for profile_run.py compatibility.
