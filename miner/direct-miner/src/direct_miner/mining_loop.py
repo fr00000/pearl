@@ -1,4 +1,5 @@
-"""Direct synthetic mining loop with diagnostics + optional Phase B B-cache."""
+"""Direct synthetic mining loop with diagnostics, B-cache, and Phase C
+multi-stream A-side overlap."""
 
 import logging
 import math
@@ -9,18 +10,23 @@ import torch
 
 from miner_base.commitment_hash import CommitmentHasher
 from miner_base.gpu_matmul_config import GPUMatmulConfigFactory
+from pearl_gemm import (
+    get_host_signal_sync_size,
+    get_required_scratchpad_bytes,
+)
 from vllm_miner.mining_state import (
     init_async_manager,
     init_pinned_pool,
     get_async_manager,
 )
 
+from .a_slot_pool import ASlotPool
 from .b_cache import BSideCache
 from .completion_tracker import CompletionTracker
 from .config import MinerConfig
 from .diagnostics import DiagnosticsCollector, target_to_log2
-from .mining_call import pearl_gemm_noisy_cached
-from .synthetic_data import FixedBPool, make_synthetic_a
+from .mining_call import pearl_gemm_noisy_phase_c
+from .synthetic_data import FixedBPool
 
 
 logger = logging.getLogger(__name__)
@@ -31,15 +37,13 @@ KERNEL_TILE_SIZE_N = 256
 
 
 class DirectMiner:
-    """Direct synthetic miner with diagnostics.
+    """Direct synthetic miner.
 
-    Connects to existing pearl-gateway via UDS. Generates fresh A per
-    iteration, reuses static B for the session, calls pearl_gemm_noisy,
-    tracks completion via CUDA events, emits per-matmul diagnostic
-    JSONL via the tracker callback.
-
-    Phase A: no caching of B-derived artifacts.
-    Phase B: optional B-side artifact caching (config.enable_b_cache).
+    Phase A: single stream, no caching.
+    Phase B: single stream + B-side caching (config.enable_b_cache).
+    Phase C: two streams (main + prep), B-cache, A-slot pool. The
+    A-side prep on stream_prep overlaps with the previous iteration's
+    main kernel on stream_main.
     """
 
     def __init__(self, config: MinerConfig):
@@ -47,54 +51,59 @@ class DirectMiner:
         self.config = config
         self.b_pool: Optional[FixedBPool] = None
 
-        self.diagnostics = DiagnosticsCollector(
-            output_path=config.metrics_output_path,
-            flush_every_n=100,
-            phase_tag=config.phase_tag,
-        )
+        # Diagnostics: disabled in Phase C production runs via
+        # --no-diagnostics. Always enabled during verification.
+        self.diagnostics: Optional[DiagnosticsCollector] = None
+        if not config.disable_diagnostics:
+            self.diagnostics = DiagnosticsCollector(
+                output_path=config.metrics_output_path,
+                flush_every_n=100,
+                phase_tag=config.phase_tag,
+            )
+            on_complete = self._on_matmul_complete
+        else:
+            logger.info("Diagnostics DISABLED (--no-diagnostics)")
+            on_complete = None
 
         self.tracker = CompletionTracker(
             max_in_flight=config.max_in_flight,
-            on_complete=self._on_matmul_complete,
+            on_complete=on_complete,
         )
 
-        # Phase B B-side cache (None unless enabled).
         self.b_cache: BSideCache | None = None
         if config.enable_b_cache:
             self.b_cache = BSideCache()
             logger.info("B-side cache ENABLED (Phase B)")
 
-        # Tile-rate accounting
+        # Phase C streams + slot pool — initialised in initialize()
+        # once shape/settings are known.
+        self.stream_main: Optional[torch.cuda.Stream] = None
+        self.stream_prep: Optional[torch.cuda.Stream] = None
+        self.a_pool: Optional[ASlotPool] = None
+
         self._outer_tiles_per_matmul = (
             math.ceil(config.shapes.m / KERNEL_TILE_SIZE_M) *
             math.ceil(config.shapes.n / KERNEL_TILE_SIZE_N)
         )
 
-        # Metrics
         self._start_time: float = 0.0
         self._last_log_time: float = 0.0
         self._last_completed_count: int = 0
         self._last_launch_count: int = 0
         self._launch_count: int = 0
 
-        # Cached matmul_config for the configured k (it depends only on k
-        # and noise_rank, both fixed for a session).
-        self._matmul_config = None  # built lazily in initialize()
+        self._matmul_config = None  # built in initialize()
 
-        # Per-template diagnostic metadata cache. Avoids paying a blake3
-        # hash + adjust_target on every iteration. Invalidated when the
-        # gateway returns a new incomplete_header_bytes (= template change).
+        # Per-template diagnostic metadata cache.
         self._meta_cache_header_bytes: bytes | None = None
         self._meta_cache_hash_key: bytes | None = None
         self._meta_cache_target_log2: float | None = None
 
     def initialize(self) -> None:
-        """Connect to gateway, allocate B."""
         logger.info("Initializing direct miner...")
 
         init_async_manager()
         init_pinned_pool(get_async_manager()._conf.pinned_pool_size)
-
         time.sleep(1.0)
 
         try:
@@ -120,10 +129,34 @@ class DirectMiner:
         )
         torch.cuda.synchronize()
 
-        # Build matmul_config once — k and noise_rank are session-stable.
-        noise_rank = get_async_manager()._conf.noise_rank
+        settings = get_async_manager()._conf
         self._matmul_config = GPUMatmulConfigFactory.create(
-            k=self.config.shapes.k, noise_rank=noise_rank
+            k=self.config.shapes.k, noise_rank=settings.noise_rank
+        )
+
+        # Phase C: two non-default streams.
+        # Both non-default to avoid legacy-default-stream implicit
+        # synchronization with each other.
+        self.stream_main = torch.cuda.Stream()
+        self.stream_prep = torch.cuda.Stream()
+        logger.info(
+            f"Phase C streams: main={self.stream_main} "
+            f"prep={self.stream_prep}"
+        )
+
+        scratchpad_bytes = get_required_scratchpad_bytes(
+            max(self.config.shapes.m * self.config.shapes.k,
+                self.config.shapes.n * self.config.shapes.k)
+        )
+        host_signal_sync_size = get_host_signal_sync_size()
+        self.a_pool = ASlotPool(
+            num_slots=self.config.max_in_flight,
+            m=self.config.shapes.m,
+            n=self.config.shapes.n,
+            k=self.config.shapes.k,
+            noise_rank=settings.noise_rank,
+            host_signal_sync_size=host_signal_sync_size,
+            scratchpad_bytes=scratchpad_bytes,
         )
 
         logger.info(
@@ -157,24 +190,14 @@ class DirectMiner:
             logger.info("Interrupted; draining in-flight work...")
             self.tracker.drain()
             self._log_final_stats()
-            self.diagnostics.close()
+            if self.diagnostics is not None:
+                self.diagnostics.close()
 
     def _capture_template_metadata(self) -> dict:
-        """Read current template state. Called BEFORE the launch so the
-        recorded template matches what the kernel actually consumed.
-
-        Caches hash_key and target_log2 by incomplete_header_bytes —
-        these change only on template rotation (every ~minutes), so
-        per-iteration cost is identity comparison + dict build.
-        """
         mining_job = get_async_manager().get_mining_job()
         mining_config = self._matmul_config.mining_config
         header_bytes = mining_job.incomplete_header_bytes
 
-        # The kernel's per-call MiningJob fetch and our cache invalidation
-        # use the same source; a header byte change means a new template.
-        # Identity check first (same object across calls is common); fall
-        # back to value compare to be safe across deserialisation.
         if (
             self._meta_cache_header_bytes is not header_bytes
             and self._meta_cache_header_bytes != header_bytes
@@ -186,30 +209,20 @@ class DirectMiner:
             self._meta_cache_target_log2 = target_to_log2(int(target))
             self._meta_cache_header_bytes = header_bytes
 
-        # MiningJob carries no height attribute (see dataclasses.py:142):
-        # only incomplete_header_bytes + target. template_hash_prefix
-        # gives us the per-template uniqueness we actually need.
         return {
             "template_height": None,
             "template_hash_prefix": self._meta_cache_hash_key[:8].hex(),
-            "hash_key": self._meta_cache_hash_key,
             "target_log2": self._meta_cache_target_log2,
         }
 
     def _on_matmul_complete(self, metadata: dict) -> None:
-        """Fired by CompletionTracker after the CUDA event completes.
-
-        block_found is null in Phase A: the per-call host_signal_header
-        pinned buffer is acquired and consumed inside pearl_gemm_noisy /
-        StatusCheckCallback; we don't have a reference to read its
-        triggered status from here without modifying gemm_operators.
-        Wins surface via wallet balance + gateway logs.
-        """
+        if self.diagnostics is None:
+            return
         self.diagnostics.record(
             template_height=metadata.get("template_height"),
             template_hash_prefix=metadata.get("template_hash_prefix"),
             target_log2=metadata.get("target_log2"),
-            best_observed_hash_log2=None,  # Case B: not exposed by kernel
+            best_observed_hash_log2=None,
             block_found=None,
             b_cache_hit=metadata.get("b_cache_hit"),
         )
@@ -218,11 +231,8 @@ class DirectMiner:
         self.tracker.wait_for_slot()
         self.tracker.reap_completed()
 
-        # Capture template state for THIS launch (matches what the kernel
-        # reads inside pearl_gemm_noisy when it calls get_mining_job()).
         meta = self._capture_template_metadata()
 
-        # Periodic template-freshness log
         if self._launch_count > 0 and self._launch_count % 500 == 0:
             target_log2 = meta.get("target_log2")
             target_str = f"{target_log2:.2f}" if target_log2 is not None else "n/a"
@@ -233,40 +243,41 @@ class DirectMiner:
                 f"target_log2={target_str}"
             )
 
-        A, A_scales = make_synthetic_a(
-            m=self.config.shapes.m,
-            k=self.config.shapes.k,
-            device="cuda",
-            generator=generator,
-        )
+        slot_idx, slot = self.a_pool.acquire()
 
-        # Drop the full hash_key before passing through the tracker; the
-        # callback only needs the public-facing prefix and other primitives.
-        # b_cache_hit is filled in below from the actual call's return value.
-        callback_meta = {k: v for k, v in meta.items() if k != "hash_key"}
+        callback_meta = dict(meta)
         callback_meta["b_cache_hit"] = None
+        callback_meta["slot_idx"] = slot_idx
 
         try:
-            _C, b_cache_hit = pearl_gemm_noisy_cached(
-                A,
-                self.b_pool.B,
-                A_scales=A_scales,
+            _C, b_cache_hit, completion_event = pearl_gemm_noisy_phase_c(
+                slot=slot,
+                B=self.b_pool.B,
                 B_scales=self.b_pool.B_scales,
-                out_dtype=torch.bfloat16,
                 matmul_config=self._matmul_config,
                 settings=get_async_manager()._conf,
                 b_cache=self.b_cache,
+                stream_main=self.stream_main,
+                stream_prep=self.stream_prep,
+                a_generator=generator,
                 submit_block=True,
             )
         except Exception as e:
-            logger.error(f"pearl_gemm_noisy_cached failed: {e}", exc_info=True)
+            logger.error(
+                f"pearl_gemm_noisy_phase_c failed: {e}", exc_info=True
+            )
             time.sleep(0.5)
             return
 
         if self.b_cache is not None:
             callback_meta["b_cache_hit"] = b_cache_hit
 
-        self.tracker.record_launch(callback_meta, A, A_scales)
+        # The slot's tensors are owned by ASlotPool and protected from
+        # reuse by max_in_flight; we pass no per-iteration tensor refs
+        # to the tracker. Use the stream_main-recorded completion_event
+        # so the on_complete callback fires when the kernel actually
+        # finishes (not when this function returned on the host).
+        self.tracker.record_launch(callback_meta, event=completion_event)
         self._launch_count += 1
 
         completed_delta = (
@@ -311,22 +322,21 @@ class DirectMiner:
             f"in_flight={in_flight}"
         )
 
-        # Diagnostics summary (best margin is null in Case B but we log
-        # whatever we have)
-        best_margin = self.diagnostics.best_margin_log2()
-        if best_margin is not None:
-            logger.info(
-                f"[DIAGNOSTICS] best_margin_log2={best_margin:.2f} "
-                f"(0 = win threshold; smaller positive = closer)"
-            )
+        if self.diagnostics is not None:
+            best_margin = self.diagnostics.best_margin_log2()
+            if best_margin is not None:
+                logger.info(
+                    f"[DIAGNOSTICS] best_margin_log2={best_margin:.2f} "
+                    f"(0 = win threshold; smaller positive = closer)"
+                )
 
-        hits, misses = self.diagnostics.cache_stats()
-        if hits + misses > 0:
-            hit_rate = hits / (hits + misses) * 100
-            logger.info(
-                f"[BCACHE] hit_rate={hit_rate:.1f}% "
-                f"({hits} hits, {misses} misses)"
-            )
+            hits, misses = self.diagnostics.cache_stats()
+            if hits + misses > 0:
+                hit_rate = hits / (hits + misses) * 100
+                logger.info(
+                    f"[BCACHE] hit_rate={hit_rate:.1f}% "
+                    f"({hits} hits, {misses} misses)"
+                )
 
         self._last_log_time = now
         self._last_completed_count = completed
@@ -344,7 +354,11 @@ class DirectMiner:
             f"tile_rate={tile_rate:.0f}/s"
         )
         if self.b_cache is not None:
-            hits, misses = self.diagnostics.cache_stats()
+            if self.diagnostics is not None:
+                hits, misses = self.diagnostics.cache_stats()
+            else:
+                stats = self.b_cache.stats()
+                hits, misses = stats["hits"], stats["misses"]
             invalidations = getattr(self.b_cache, "invalidations", 0)
             logger.info(
                 f"[BCACHE FINAL] hits={hits} misses={misses} "

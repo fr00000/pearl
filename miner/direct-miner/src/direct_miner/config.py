@@ -65,5 +65,12 @@ class MinerConfig:
     # Phase B: enable B-side caching across iterations within a template
     enable_b_cache: bool = False
 
+    # Phase C: disable diagnostic JSONL writes for max throughput in
+    # validated production runs. Diagnostics adds ~20% overhead from
+    # per-matmul JSON serialise + disk flush. Keep enabled during
+    # Phase C verification — diagnostics are how we catch correctness
+    # bugs.
+    disable_diagnostics: bool = False
+
 
 DEFAULT_CONFIG: Final = MinerConfig()

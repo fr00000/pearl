@@ -49,6 +49,12 @@ def main():
         "--enable-b-cache", action="store_true",
         help="enable Phase B B-side artifact caching"
     )
+    parser.add_argument(
+        "--no-diagnostics", action="store_true",
+        help="disable diagnostic JSONL writes for max throughput "
+             "(use only for validated production runs; not for "
+             "Phase C correctness verification)"
+    )
     args = parser.parse_args()
 
     setup_logging(args.log_level)
@@ -61,6 +67,7 @@ def main():
         metrics_output_path=args.metrics_output,
         phase_tag=args.phase_tag,
         enable_b_cache=args.enable_b_cache,
+        disable_diagnostics=args.no_diagnostics,
     )
 
     miner = DirectMiner(config)

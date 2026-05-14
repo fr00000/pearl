@@ -55,15 +55,25 @@ class CompletionTracker:
         self,
         metadata: dict | None,
         *tensor_refs: torch.Tensor,
+        event: Optional[torch.cuda.Event] = None,
     ) -> None:
         """Record event after kernel launch.
 
         metadata is opaque to the tracker; passed to on_complete callback
         when the event finishes. tensor_refs are stored to keep tensors
         alive until the GPU is done with them.
+
+        event: if provided, used as the completion event (must already
+        be recorded on the appropriate stream). If None, the tracker
+        creates and records its own event on the current stream — fine
+        for single-default-stream callers. Phase C callers pass an
+        event recorded on stream_main so the callback fires when the
+        main kernel actually completes, not when this method is called
+        from outside any stream context.
         """
-        event = torch.cuda.Event()
-        event.record()
+        if event is None:
+            event = torch.cuda.Event()
+            event.record()
         self.in_flight.append((event, metadata or {}, *tensor_refs))
 
     def reap_completed(self) -> int:

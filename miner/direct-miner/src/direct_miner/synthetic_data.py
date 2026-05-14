@@ -44,6 +44,34 @@ def make_synthetic_a(
     return A, A_scales
 
 
+def make_synthetic_a_into(
+    A: torch.Tensor,
+    A_scales: torch.Tensor,
+    generator: Optional[torch.Generator] = None,
+) -> None:
+    """In-place A generation into pre-allocated buffers.
+
+    Same value semantics as make_synthetic_a (int7 range, fp32 scales
+    in [0, 1/128]) but reuses caller-owned buffers — required for the
+    Phase C slot pool which pre-allocates A per max_in_flight slot.
+
+    A must be (m, k) int8 and A_scales must be (m,) fp32. Verified at
+    runtime; raises on mismatch.
+    """
+    if A.dtype != torch.int8:
+        raise ValueError(f"A must be int8, got {A.dtype}")
+    if A_scales.dtype != torch.float32:
+        raise ValueError(f"A_scales must be fp32, got {A_scales.dtype}")
+
+    torch.randint(
+        -64, 64,
+        size=A.shape,
+        generator=generator,
+        out=A,
+    )
+    A_scales.uniform_(0.0, 1.0 / 128.0, generator=generator)
+
+
 def make_synthetic_b(
     n: int,
     k: int,

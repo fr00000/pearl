@@ -1,15 +1,30 @@
-"""Phase B mining call with B-side artifact caching.
+"""Phase C mining call: B-side cache + multi-stream A-side overlap.
 
-Mirrors the body of vllm_miner.gemm_operators.pearl_gemm_noisy but adds
-hooks for skipping B-side recomputation when the template hasn't changed.
+A-side prep (in-place A generation, A tensor_hash, commitment_hash,
+A-side noise_gen) runs on stream_prep so it overlaps with the
+previous iteration's main kernel on stream_main.
 
-Strategy C-lite: this is a parallel implementation rather than a
-modification of pearl_gemm_noisy in vllm-miner. The duplication carries
-a drift hazard — if pearl_gemm_noisy changes, this file must follow.
+Cross-stream barrier:
+    prep_done_event (recorded on stream_prep) →
+    stream_main.wait_event(prep_done_event) before noisy_gemm
 
-Lower-level building blocks (tensor_hash, commitment_hash_from_merkle_roots,
-noise_gen, noisy_gemm, make_pow_target_tensor) are imported from pearl_gemm
-directly; we do NOT call vllm-miner's pearl_gemm_noisy here.
+Cache-miss path: B-side compute runs on stream_main, with stream_prep
+waiting via b_hash_done for B_tensor_hash before commitment_hash. This
+adds a sync point but only fires once per template (~95 s).
+
+Strategy C-lite caveat unchanged: this is a parallel implementation
+of vllm_miner.gemm_operators.pearl_gemm_noisy and must be kept in
+sync if the protocol changes.
+
+Slot-pool tensors are owned by the caller's ASlotPool. This function
+WRITES into slot.A, slot.A_scales (via make_synthetic_a_into),
+slot.A_tensor_hash, slot.commitment_hash_A, slot.EAL, slot.EAR_*,
+slot.host_signal_sync, slot.C; READS from slot.tensor_hash_scratchpad.
+
+Returns (slot.C, b_cache_hit, completion_event). The completion_event
+is recorded on stream_main immediately after noisy_gemm; pass it to
+CompletionTracker.record_launch(event=...) so the callback fires when
+the main kernel actually finishes, not when this function returns.
 """
 
 import logging
@@ -20,8 +35,6 @@ from miner_base.commitment_hash import CommitmentHasher
 from pearl_gateway.comm.dataclasses import MiningJob
 from pearl_gemm import (
     commitment_hash_from_merkle_roots,
-    get_host_signal_sync_size,
-    get_required_scratchpad_bytes,
     make_pow_target_tensor,
     noise_gen,
     noisy_gemm,
@@ -30,29 +43,267 @@ from pearl_gemm import (
 from vllm_miner.callbacks import StatusCheckCallback
 from vllm_miner.mining_state import get_async_manager, get_pinned_pool
 
+from .a_slot_pool import ASlot
 from .b_cache import BSideArtifacts, BSideCache
+from .synthetic_data import make_synthetic_a_into
 
 
 logger = logging.getLogger(__name__)
 
 
+def pearl_gemm_noisy_phase_c(
+    slot: ASlot,
+    B: torch.Tensor,
+    B_scales: torch.Tensor,
+    matmul_config,
+    settings,
+    b_cache: Optional[BSideCache],
+    stream_main: torch.cuda.Stream,
+    stream_prep: torch.cuda.Stream,
+    a_generator: Optional[torch.Generator] = None,
+    submit_block: bool = True,
+) -> tuple[torch.Tensor, bool, torch.cuda.Event]:
+    m, k = slot.A.shape
+    n = B.shape[0]
+    r = settings.noise_rank
+    device = slot.A.device
+
+    mining_job: MiningJob = get_async_manager().get_mining_job()
+    mining_config = matmul_config.mining_config
+    adjusted_target = mining_job.adjust_target(mining_config=mining_config)
+
+    hash_key = CommitmentHasher.get_key(
+        mining_job.incomplete_header_bytes, mining_config
+    )
+
+    cached: Optional[BSideArtifacts] = (
+        b_cache.get(hash_key) if b_cache is not None else None
+    )
+    b_cache_hit = cached is not None
+
+    # ===== A-side prep on stream_prep =====
+    # The H2D copy of key_tensor happens inside stream_prep so the
+    # tensor_hash on stream_prep sees the populated buffer without an
+    # implicit-default-stream sync. On cache miss, stream_main also
+    # needs key_tensor for B_tensor_hash; we record an event after the
+    # copy and have stream_main wait on it below.
+    with torch.cuda.stream(stream_prep):
+        key_tensor = torch.frombuffer(
+            bytearray(hash_key), dtype=torch.uint8
+        ).to(device, non_blocking=True)
+
+        # Record event after key_tensor copy so stream_main (cache-miss
+        # path) can sync against it without serialising on stream_prep
+        # work that comes after.
+        key_ready_event = torch.cuda.Event()
+        key_ready_event.record(stream_prep)
+
+        make_synthetic_a_into(
+            slot.A, slot.A_scales, generator=a_generator
+        )
+
+        # A.view(uint8) is byte-identical to .to(uint8) (-64→192 etc),
+        # confirmed before writing this code. Skipping the copy saves
+        # the 56 µs direct_copy_kernel_cuda that showed up at 8.2%
+        # of GPU time in the Phase B nsys profile.
+        tensor_hash(
+            slot.A.view(torch.uint8),
+            key_tensor,
+            slot.A_tensor_hash,
+            slot.tensor_hash_scratchpad,
+        )
+
+    # ===== B-side: cache lookup or compute on stream_main =====
+    if cached is not None:
+        B_tensor_hash = cached.B_tensor_hash
+        commitment_hash_B_tensor = cached.commitment_hash_B
+        EBR = cached.EBR
+        EBR_fp16 = cached.EBR_fp16
+        EBL_R_major = cached.EBL_R_major
+        EBL_K_major = cached.EBL_K_major
+        BpEB = cached.BpEB
+    else:
+        # Cache miss — compute B-side on stream_main. stream_main needs
+        # key_tensor first.
+        stream_main.wait_event(key_ready_event)
+        with torch.cuda.stream(stream_main):
+            B_tensor_hash = torch.empty(
+                32, dtype=torch.uint8, device=device
+            )
+            tensor_hash(
+                B.view(torch.uint8),
+                key_tensor,
+                B_tensor_hash,
+                slot.tensor_hash_scratchpad,
+            )
+            commitment_hash_B_tensor = torch.empty(
+                32, dtype=torch.uint8, device=device
+            )
+            EBR = torch.empty((n, r), dtype=torch.int8, device=device)
+            EBR_fp16 = torch.empty((n, r), dtype=torch.float16, device=device)
+            EBL_R_major = torch.empty((k, r), dtype=torch.int8, device=device)
+            EBL_K_major = torch.empty((r, k), dtype=torch.int8, device=device)
+            BpEB = torch.empty((n, k), dtype=torch.int8, device=device)
+
+        # stream_prep needs B_tensor_hash before commitment_hash below.
+        b_hash_done = torch.cuda.Event()
+        b_hash_done.record(stream_main)
+        stream_prep.wait_event(b_hash_done)
+
+    # commitment_hash + A-side noise on stream_prep
+    with torch.cuda.stream(stream_prep):
+        if cached is not None:
+            # commitment_hash_from_merkle_roots always writes both A and
+            # B. On a cache hit we already have commitment_hash_B; use a
+            # throwaway for the B output. Cost: blake3 of 64 bytes,
+            # negligible.
+            commitment_hash_B_throwaway = torch.empty(
+                32, dtype=torch.uint8, device=device
+            )
+            commitment_hash_from_merkle_roots(
+                slot.A_tensor_hash,
+                B_tensor_hash,
+                key_tensor,
+                slot.commitment_hash_A,
+                commitment_hash_B_throwaway,
+            )
+            del commitment_hash_B_throwaway
+
+            noise_gen(
+                R=r,
+                EAL=slot.EAL,
+                EAL_fp16=slot.EAL_fp16,
+                EAR_R_major=slot.EAR_R_major,
+                EAR_K_major=slot.EAR_K_major,
+                key_A=slot.commitment_hash_A,
+            )
+        else:
+            commitment_hash_from_merkle_roots(
+                slot.A_tensor_hash,
+                B_tensor_hash,
+                key_tensor,
+                slot.commitment_hash_A,
+                commitment_hash_B_tensor,
+            )
+
+            # Cache miss path: B-side noise factors generated together
+            # with A-side. stream_prep is already in front of
+            # B_tensor_hash via b_hash_done; commitment_hash_B is also
+            # ready by the time noise_gen reads it (same stream).
+            noise_gen(
+                R=r,
+                EAL=slot.EAL,
+                EAL_fp16=slot.EAL_fp16,
+                EAR_R_major=slot.EAR_R_major,
+                EAR_K_major=slot.EAR_K_major,
+                EBL_R_major=EBL_R_major,
+                EBL_K_major=EBL_K_major,
+                EBR=EBR,
+                EBR_fp16=EBR_fp16,
+                key_A=slot.commitment_hash_A,
+                key_B=commitment_hash_B_tensor,
+            )
+
+    prep_done_event = torch.cuda.Event()
+    prep_done_event.record(stream_prep)
+
+    # ===== Main kernel on stream_main, waits for prep_done =====
+    stream_main.wait_event(prep_done_event)
+
+    host_signal_header_pinned = get_pinned_pool().acquire()
+    pow_target_tensor = make_pow_target_tensor(adjusted_target)
+    run_noising_B = (cached is None)
+
+    with torch.cuda.stream(stream_main):
+        # Slot's host_signal_sync is reused across iterations; reset
+        # before the kernel reads it.
+        slot.host_signal_sync.zero_()
+
+        noisy_gemm(
+            A=slot.A,
+            B=B,
+            EAL=slot.EAL,
+            EAL_fp16=slot.EAL_fp16,
+            EBR=EBR,
+            EBR_fp16=EBR_fp16,
+            EAR_R_major=slot.EAR_R_major,
+            EBL_R_major=EBL_R_major,
+            EAR_K_major=slot.EAR_K_major,
+            EBL_K_major=EBL_K_major,
+            AxEBL_fp16=slot.A_E_BL,
+            EARxBpEB_fp16=slot.EARxBpEB,
+            ApEA=slot.ApEA,
+            BpEB=BpEB,
+            A_scales=slot.A_scales,
+            B_scales=B_scales,
+            C=slot.C,
+            host_signal_header_pinned=host_signal_header_pinned,
+            host_signal_sync=slot.host_signal_sync,
+            pow_target=pow_target_tensor,
+            pow_key=slot.commitment_hash_A.view(torch.uint32),
+            tile_size_m=settings.tile_size_m,
+            tile_size_n=settings.tile_size_n,
+            tile_size_k=settings.tile_size_k,
+            run_noising_A=True,
+            run_noising_B=run_noising_B,
+            skip_reduction=False,
+            skip_denoising=False,
+        )
+
+    completion_event = torch.cuda.Event()
+    completion_event.record(stream_main)
+
+    # Post-launch: populate cache and schedule status-check callback.
+    if b_cache is not None and cached is None:
+        b_cache.put(
+            hash_key,
+            BSideArtifacts(
+                B_tensor_hash=B_tensor_hash,
+                commitment_hash_B=commitment_hash_B_tensor,
+                EBR=EBR,
+                EBR_fp16=EBR_fp16,
+                EBL_R_major=EBL_R_major,
+                EBL_K_major=EBL_K_major,
+                BpEB=BpEB,
+            ),
+        )
+
+    if submit_block:
+        callback = StatusCheckCallback(
+            host_signal_header_pinned=host_signal_header_pinned,
+            commitment_hash_A_tensor=slot.commitment_hash_A,
+            commitment_hash_B_tensor=commitment_hash_B_tensor,
+            A=slot.A,
+            B=B,
+            mining_job=mining_job,
+        )
+        get_async_manager().schedule_status_check(completion_event, callback)
+        host_signal_header_pinned = None  # owned by callback
+    else:
+        get_pinned_pool().release(host_signal_header_pinned)
+        del host_signal_header_pinned
+
+    return slot.C, b_cache_hit, completion_event
+
+
+# Legacy single-stream cached call retained for profile_run.py compatibility.
+# profile_run uses synchronous CUDA-event timing where multi-stream would
+# muddy the per-phase breakdown, so it keeps the simpler Phase B body.
 def pearl_gemm_noisy_cached(
     A: torch.Tensor,
     B: torch.Tensor,
     A_scales: torch.Tensor,
     B_scales: torch.Tensor,
     out_dtype: torch.dtype,
-    matmul_config,  # GPUMatmulConfigFactory.create(...) result
-    settings,  # MinerSettings (tile sizes, noise rank)
+    matmul_config,
+    settings,
     b_cache: Optional[BSideCache] = None,
     submit_block: bool = True,
 ) -> tuple[torch.Tensor, bool]:
-    """Mining call with optional B-side caching.
-
-    Returns (C, b_cache_hit) where b_cache_hit is True iff cached B-side
-    artifacts were used (False on cache miss or when b_cache is None).
-    """
+    """Phase B single-stream cached call. Kept for profile_run.py."""
     assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
+
+    from pearl_gemm import get_host_signal_sync_size, get_required_scratchpad_bytes
 
     m, k = A.shape
     n = B.shape[0]
@@ -60,7 +311,6 @@ def pearl_gemm_noisy_cached(
     device = A.device
 
     C = torch.empty((m, n), dtype=out_dtype, device=device)
-
     matrix_bytes = max(m * k, n * k)
     tensor_hash_scratchpad = torch.empty(
         get_required_scratchpad_bytes(matrix_bytes),
@@ -79,16 +329,14 @@ def pearl_gemm_noisy_cached(
         bytearray(hash_key), dtype=torch.uint8
     ).to(device)
 
-    # ---- A-side (always per-call) ----
     A_tensor_hash = torch.empty(32, device=device, dtype=torch.uint8)
     tensor_hash(
-        A.to(torch.uint8),
+        A.view(torch.uint8),
         key_tensor,
         A_tensor_hash,
         tensor_hash_scratchpad,
     )
 
-    # ---- B-side (cacheable) ----
     cached: Optional[BSideArtifacts] = (
         b_cache.get(hash_key) if b_cache is not None else None
     )
@@ -105,16 +353,12 @@ def pearl_gemm_noisy_cached(
     else:
         B_tensor_hash = torch.empty(32, device=device, dtype=torch.uint8)
         tensor_hash(
-            B.to(torch.uint8),
+            B.view(torch.uint8),
             key_tensor,
             B_tensor_hash,
             tensor_hash_scratchpad,
         )
 
-    # commitment_hash_from_merkle_roots writes BOTH A and B commitment
-    # hashes. On a cache hit we still want commitment_hash_A but already
-    # have commitment_hash_B; we pass a throwaway tensor for B and ignore
-    # the write. The cost is one blake3 of 64 bytes — negligible.
     commitment_hash_A_tensor = torch.empty(32, device=device, dtype=torch.uint8)
     if cached is not None:
         commitment_hash_B_throwaway = torch.empty(
@@ -127,7 +371,6 @@ def pearl_gemm_noisy_cached(
             commitment_hash_A_tensor,
             commitment_hash_B_throwaway,
         )
-        del commitment_hash_B_throwaway
     else:
         commitment_hash_B_tensor = torch.empty(
             32, device=device, dtype=torch.uint8
@@ -140,16 +383,12 @@ def pearl_gemm_noisy_cached(
             commitment_hash_B_tensor,
         )
 
-    # ---- Noise factors ----
-    # A-side: always generated.
     EAL = torch.empty((m, r), dtype=torch.int8, device=device)
     EAL_fp16 = torch.empty((m, r), dtype=torch.float16, device=device)
     EAR_R_major = torch.empty((k, r), dtype=torch.int8, device=device)
     EAR_K_major = torch.empty((r, k), dtype=torch.int8, device=device)
 
     if cached is not None:
-        # Skip B-side noise outputs and key_B per noise_gen docstring:
-        # "To not involve noise matrices, just skip that argument."
         noise_gen(
             R=r,
             EAL=EAL,
@@ -177,10 +416,7 @@ def pearl_gemm_noisy_cached(
             key_B=commitment_hash_B_tensor,
         )
 
-    # ---- BpEB / EARxBpEB / kernel output buffers ----
     if cached is None:
-        # Cache miss: BpEB is filled by noisy_gemm's B-noising path,
-        # so allocate it as an OUTPUT buffer here.
         BpEB = torch.empty((n, k), dtype=torch.int8, device=device)
 
     EARxBpEB = torch.empty((n, r), dtype=torch.float16, device=device)
@@ -194,11 +430,6 @@ def pearl_gemm_noisy_cached(
     host_signal_header_pinned = get_pinned_pool().acquire()
 
     pow_target_tensor = make_pow_target_tensor(adjusted_target)
-
-    # Critical: on a cache hit, run_noising_B=False uses the cached BpEB
-    # as INPUT instead of recomputing it from B+EBR+EBL. The kernel still
-    # needs EBR/EBL/EBR_fp16 for the denoising epilogue, hence we pass
-    # the cached versions.
     run_noising_B = (cached is None)
 
     noisy_gemm(
@@ -232,9 +463,7 @@ def pearl_gemm_noisy_cached(
         skip_denoising=False,
     )
 
-    # ---- Post-launch: cache populate, schedule status check ----
     if b_cache is not None and cached is None:
-        # Populate cache with what we just computed.
         b_cache.put(
             hash_key,
             BSideArtifacts(
@@ -260,7 +489,7 @@ def pearl_gemm_noisy_cached(
             mining_job=mining_job,
         )
         get_async_manager().schedule_status_check(cuda_event, callback)
-        host_signal_header_pinned = None  # owned by callback
+        host_signal_header_pinned = None
     else:
         get_pinned_pool().release(host_signal_header_pinned)
         del host_signal_header_pinned
