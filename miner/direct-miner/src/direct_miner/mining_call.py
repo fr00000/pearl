@@ -51,6 +51,73 @@ from .synthetic_data import make_synthetic_a_into
 logger = logging.getLogger(__name__)
 
 
+def _cleanup_unscheduled_slot(
+    *,
+    kernel_launched: bool,
+    completion_event,
+    host_signal_header_pinned,
+    release_pinned_header: Callable[[object], None],
+    on_callback_done: Optional[Callable[[], None]],
+) -> None:
+    """Outer-finally cleanup for paths that did not transfer slot
+    ownership to a scheduled callback.
+
+    Order matters:
+      1. If the main kernel was launched, synchronize before touching
+         any of its inputs/outputs. Try completion_event first, then
+         torch.cuda.synchronize() as a fallback. If both fail, raise —
+         we cannot prove the GPU is idle, so releasing the slot would
+         risk corrupting slot.A while the kernel is still writing it.
+      2. Only after sync succeeds: release the pinned header (still
+         live as the kernel's output buffer; same safety argument).
+      3. Only after the pinned header is back in the pool: release
+         the A slot via on_callback_done.
+
+    On sync failure, both pinned header and slot are deliberately
+    leaked. The miner will eventually hang on a future acquire()
+    (default timeout=None, fail-closed). That's the intended visible
+    failure — operator restart via bootstrap re-run is the recovery
+    path. A prematurely released slot can corrupt a winning proof;
+    a leaked slot just costs throughput.
+    """
+    if kernel_launched and completion_event is not None:
+        try:
+            completion_event.synchronize()
+        except Exception:
+            logger.exception(
+                "completion_event.synchronize() failed; falling back to "
+                "torch.cuda.synchronize() before releasing slot"
+            )
+            try:
+                import torch
+                torch.cuda.synchronize()
+            except Exception:
+                logger.exception(
+                    "torch.cuda.synchronize() also failed; refusing to "
+                    "release A slot — GPU may still be writing to "
+                    "slot.A. Miner must be restarted."
+                )
+                raise RuntimeError(
+                    "Failed to synchronize CUDA work before slot release; "
+                    "refusing to release A slot to avoid tensor corruption. "
+                    "Miner must be restarted via the bootstrap script."
+                )
+
+    if host_signal_header_pinned is not None:
+        try:
+            release_pinned_header(host_signal_header_pinned)
+        except Exception:
+            logger.exception(
+                "Failed to release pinned header in outer cleanup"
+            )
+
+    if on_callback_done is not None:
+        try:
+            on_callback_done()
+        except Exception:
+            logger.exception("Slot release in outer cleanup failed")
+
+
 class _SlotReleasingCallback:
     """Wraps StatusCheckCallback so the A-slot is released even if the
     callback raises. The slot must stay owned until any win-path work
@@ -104,21 +171,6 @@ def pearl_gemm_noisy_phase_c(
     function invokes it directly via the outer finally to release the
     slot — exactly one release path runs.
     """
-    # PREFLIGHT: verify async event processing is enabled BEFORE any
-    # GPU work or pinned-header acquisition. If we discover the config
-    # is wrong AFTER launching the kernel, releasing the slot would
-    # race the in-flight kernel writing to slot.A. Fail before we have
-    # anything to clean up.
-    if submit_block:
-        manager = get_async_manager()
-        if not manager._conf.enable_async_cuda_event_processing:
-            raise RuntimeError(
-                "Direct miner requires async CUDA event processing "
-                "(enable_async_cuda_event_processing=True). The slot "
-                "lifetime contract depends on the async callback "
-                "firing to release slot ownership."
-            )
-
     # Tracks whether ownership of on_callback_done has been
     # transferred to a scheduled callback (or whether we still
     # owe the release on the error path).
@@ -135,7 +187,27 @@ def pearl_gemm_noisy_phase_c(
     # scope so the finally block can release it on failure paths.
     host_signal_header_pinned = None
 
+    # completion_event is created inside the try block. Bind in outer
+    # scope so the finally can reference it; it stays None until the
+    # kernel actually launches.
+    completion_event = None
+
     try:
+        # PREFLIGHT: verify async event processing is enabled BEFORE
+        # any GPU work or pinned-header acquisition. Inside the try
+        # so the outer finally still releases the slot (via
+        # on_callback_done) on this failure path — otherwise preflight
+        # raises would leak the caller's already-acquired slot.
+        if submit_block:
+            manager = get_async_manager()
+            if not manager._conf.enable_async_cuda_event_processing:
+                raise RuntimeError(
+                    "Direct miner requires async CUDA event processing "
+                    "(enable_async_cuda_event_processing=True). The slot "
+                    "lifetime contract depends on the async callback "
+                    "firing to release slot ownership."
+                )
+
         m, k = slot.A.shape
         n = B.shape[0]
         r = settings.noise_rank
@@ -375,37 +447,16 @@ def pearl_gemm_noisy_phase_c(
 
     finally:
         if not scheduled_or_owned:
-            # If the kernel was launched but scheduling failed (or any
-            # other post-launch error), the GPU may still be writing
-            # to slot.A. Wait for it to finish before releasing the
-            # slot — otherwise the next iteration's kernel races this
-            # one's write.
-            if kernel_launched:
-                try:
-                    completion_event.synchronize()
-                except Exception:
-                    logger.exception(
-                        "Failed to synchronize completion event before "
-                        "slot release; proceeding to release anyway"
-                    )
-
-            # Release pinned header if we still own it. Successful
-            # scheduling transferred ownership by setting
-            # host_signal_header_pinned = None.
-            if host_signal_header_pinned is not None:
-                try:
-                    get_pinned_pool().release(host_signal_header_pinned)
-                except Exception:
-                    logger.exception(
-                        "Failed to release pinned header in outer finally"
-                    )
-
-            # Release the slot.
-            if on_callback_done is not None:
-                try:
-                    on_callback_done()
-                except Exception:
-                    logger.exception("Slot release in outer finally failed")
+            # If sync fails inside the helper, it raises and we
+            # deliberately do NOT release the slot (or pinned header).
+            # Leak is the correct behavior — see helper docstring.
+            _cleanup_unscheduled_slot(
+                kernel_launched=kernel_launched,
+                completion_event=completion_event,
+                host_signal_header_pinned=host_signal_header_pinned,
+                release_pinned_header=lambda h: get_pinned_pool().release(h),
+                on_callback_done=on_callback_done,
+            )
 
 
 # Legacy single-stream cached call retained for profile_run.py compatibility.
