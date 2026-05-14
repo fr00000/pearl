@@ -25,6 +25,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from direct_miner.mining_call import UnsafeSlotReleaseError
+
 
 # ---------------------------------------------------------------------------
 # _cleanup_unscheduled_slot: directly testable; no CUDA needed.
@@ -76,7 +78,7 @@ def test_cleanup_sync_failure_does_not_release_slot():
 
     # Patch torch.cuda.synchronize to also fail.
     with patch("torch.cuda.synchronize", side_effect=RuntimeError("driver dead")):
-        with pytest.raises(RuntimeError, match="refusing to release A slot"):
+        with pytest.raises(UnsafeSlotReleaseError, match="refusing to release A slot"):
             _cleanup_unscheduled_slot(
                 gpu_work_queued=True,
                 completion_event=fake_event,
@@ -206,7 +208,7 @@ def test_cleanup_pre_main_sync_failure_does_not_release_slot():
     on_callback_done = MagicMock()
 
     with patch("torch.cuda.synchronize", side_effect=RuntimeError("driver dead")):
-        with pytest.raises(RuntimeError, match="refusing to release A slot"):
+        with pytest.raises(UnsafeSlotReleaseError, match="refusing to release A slot"):
             _cleanup_unscheduled_slot(
                 gpu_work_queued=True,
                 completion_event=None,
@@ -217,6 +219,52 @@ def test_cleanup_pre_main_sync_failure_does_not_release_slot():
 
     release_pinned.assert_not_called()
     on_callback_done.assert_not_called()
+
+
+def test_cleanup_passes_device_to_fallback_synchronize():
+    """When the helper falls back to torch.cuda.synchronize() and a
+    specific device was passed in, it must target that device. Syncing
+    the wrong device under a future multi-GPU mode would silently leave
+    work in flight on the right one."""
+
+    from direct_miner.mining_call import _cleanup_unscheduled_slot
+
+    release_pinned = MagicMock()
+    on_callback_done = MagicMock()
+    sentinel_device = MagicMock(name="cuda:1")  # stand-in for torch.device
+
+    with patch("torch.cuda.synchronize") as fallback_sync:
+        _cleanup_unscheduled_slot(
+            gpu_work_queued=True,
+            completion_event=None,  # force fallback path
+            host_signal_header_pinned=object(),
+            release_pinned_header=release_pinned,
+            on_callback_done=on_callback_done,
+            device=sentinel_device,
+        )
+        fallback_sync.assert_called_once_with(device=sentinel_device)
+
+
+def test_cleanup_device_none_calls_synchronize_without_kwarg():
+    """When device is None (default), the fallback sync is called
+    without a kwarg — preserves backward-compat for any caller that
+    doesn't yet thread the device through."""
+
+    from direct_miner.mining_call import _cleanup_unscheduled_slot
+
+    release_pinned = MagicMock()
+    on_callback_done = MagicMock()
+
+    with patch("torch.cuda.synchronize") as fallback_sync:
+        _cleanup_unscheduled_slot(
+            gpu_work_queued=True,
+            completion_event=None,
+            host_signal_header_pinned=object(),
+            release_pinned_header=release_pinned,
+            on_callback_done=on_callback_done,
+            # device defaults to None
+        )
+        fallback_sync.assert_called_once_with()
 
 
 def test_cleanup_handles_none_pinned_and_none_callback():

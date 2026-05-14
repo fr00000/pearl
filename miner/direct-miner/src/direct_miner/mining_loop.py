@@ -25,7 +25,7 @@ from .b_cache import BSideCache
 from .completion_tracker import CompletionTracker
 from .config import MinerConfig
 from .diagnostics import DiagnosticsCollector, target_to_log2
-from .mining_call import pearl_gemm_noisy_phase_c
+from .mining_call import UnsafeSlotReleaseError, pearl_gemm_noisy_phase_c
 from .synthetic_data import FixedBPool
 
 
@@ -204,6 +204,21 @@ class DirectMiner:
             # Re-raise so the process exits with a non-zero status that
             # operators (and monitor cron) can detect as a hard failure.
             raise
+        except UnsafeSlotReleaseError:
+            logger.critical(
+                "Mining loop exiting due to unsafe slot cleanup failure. "
+                "Refusing to continue because slot ownership cannot be "
+                "proven safe."
+            )
+            # Deliberately NOT calling self._shutdown_drain() here:
+            # the cleanup failure means CUDA sync is already unhealthy,
+            # so draining (which itself relies on sync) could hang or
+            # hit the same broken path. The priority is to exit so the
+            # supervisor / bootstrap re-run can restart cleanly.
+            self._log_final_stats()
+            if self.diagnostics is not None:
+                self.diagnostics.close()
+            raise
 
     def _shutdown_drain(self) -> None:
         """Best-effort drain on shutdown. Order matters:
@@ -313,6 +328,18 @@ class DirectMiner:
                 submit_block=True,
                 on_callback_done=release_this_slot,
             )
+        except UnsafeSlotReleaseError:
+            # Cleanup couldn't prove the GPU is idle, so the slot was
+            # deliberately not released. Continuing to mine would risk
+            # proof corruption — surface as a fatal exit so a
+            # supervisor / bootstrap re-run can restart cleanly.
+            # Do NOT swallow into the generic handler below.
+            logger.critical(
+                "Fatal A-slot cleanup failure; exiting so supervisor "
+                "can restart.",
+                exc_info=True,
+            )
+            raise
         except Exception as e:
             logger.error(
                 f"pearl_gemm_noisy_phase_c failed: {e}", exc_info=True

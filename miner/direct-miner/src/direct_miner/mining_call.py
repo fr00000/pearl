@@ -51,6 +51,19 @@ from .synthetic_data import make_synthetic_a_into
 logger = logging.getLogger(__name__)
 
 
+class UnsafeSlotReleaseError(RuntimeError):
+    """Raised when cleanup cannot prove GPU work is complete, so the A
+    slot must not be released. Fatal for the miner process — the run
+    loop catches this exception specifically and exits non-zero so a
+    supervisor / bootstrap re-run can restart cleanly.
+
+    Distinct from generic RuntimeError so the broad except-Exception
+    handler in _mine_one_iteration can let this one escape without
+    swallowing routine errors (e.g., transient kernel failures).
+    """
+    pass
+
+
 def _cleanup_unscheduled_slot(
     *,
     gpu_work_queued: bool,
@@ -58,6 +71,7 @@ def _cleanup_unscheduled_slot(
     host_signal_header_pinned,
     release_pinned_header: Callable[[object], None],
     on_callback_done: Optional[Callable[[], None]],
+    device=None,
 ) -> None:
     """Outer-finally cleanup for paths that did not transfer slot
     ownership to a scheduled callback.
@@ -113,11 +127,16 @@ def _cleanup_unscheduled_slot(
         # exists yet — pre-main-kernel failure). Waits for all
         # kernels on all streams of this device, covering both
         # stream_prep and stream_main regardless of which streams
-        # queued work.
+        # queued work. Target slot.A.device specifically when known;
+        # syncing the wrong device under a future multi-GPU mode
+        # would silently leave work in flight.
         if not sync_ok:
             try:
                 import torch
-                torch.cuda.synchronize()
+                if device is not None:
+                    torch.cuda.synchronize(device=device)
+                else:
+                    torch.cuda.synchronize()
                 sync_ok = True
             except Exception:
                 logger.exception(
@@ -126,7 +145,7 @@ def _cleanup_unscheduled_slot(
                 )
 
         if not sync_ok:
-            raise RuntimeError(
+            raise UnsafeSlotReleaseError(
                 "Failed to synchronize CUDA work before slot release; "
                 "refusing to release A slot to avoid tensor corruption. "
                 "Miner must be restarted via the bootstrap script."
@@ -491,6 +510,7 @@ def pearl_gemm_noisy_phase_c(
                 host_signal_header_pinned=host_signal_header_pinned,
                 release_pinned_header=lambda h: get_pinned_pool().release(h),
                 on_callback_done=on_callback_done,
+                device=slot.A.device,
             )
 
 
