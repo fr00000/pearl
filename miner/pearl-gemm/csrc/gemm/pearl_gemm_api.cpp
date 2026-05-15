@@ -653,9 +653,11 @@ void noisy_gemm(
     std::optional<int64_t> k_blocks_per_split_noising_B_ = std::nullopt,
     bool run_noising_a = true, bool run_noising_b = true,
     bool skip_reduction = false, bool skip_denoising = false,
+    bool mine_only = false,
     std::optional<at::Tensor> inner_hash_counter = std::nullopt,
     bool enable_debug = false) {
   auto dprops = at::cuda::getCurrentDeviceProperties();
+  bool const effective_skip_denoising = skip_denoising || mine_only;
 
   at::Tensor EAL_fp16, EBR_fp16, EAR_R_major, EBL_R_major, EAR_K_major,
       EBL_K_major, EARxBpEB_int32, AxEBL_int32;
@@ -791,7 +793,7 @@ void noisy_gemm(
   }
 
   int const pipeline_stages = pipeline_stages_.value_or(
-      get_pipeline_stages(bM, bN, bK, r, skip_denoising, dprops));
+      get_pipeline_stages(bM, bN, bK, r, effective_skip_denoising, dprops));
 
   PearlAPIParams params;
   using ElementOut = cutlass::bfloat16_t;
@@ -867,57 +869,66 @@ void noisy_gemm(
   bool kernel_found_noising_b = false;
 
   bool do_denoise_conversion =
-      (int32_noising_EARxBpEB || int32_noising_AxEBL) && (!skip_denoising);
+      (int32_noising_EARxBpEB || int32_noising_AxEBL) &&
+      (!effective_skip_denoising);
 
-  DEBUG_MODE_SWITCH(
-      enable_debug, EnableDebug,
-      SKIP_REDUCTION_SWITCH(
-          skip_reduction, SkipReduction,
-          SKIP_DENOISING_SWITCH(
-              skip_denoising, SkipDenoising,
+  BOOL_SWITCH(
+      mine_only, MineOnly,
+      DEBUG_MODE_SWITCH(
+          enable_debug, EnableDebug,
+          SKIP_REDUCTION_SWITCH(
+              skip_reduction, SkipReduction,
+              SKIP_DENOISING_SWITCH(
+                  effective_skip_denoising, SkipDenoising,
 
-              if (run_noising_a) {
-                NOISING_A_CONFIG_SWITCH(
-                    tile_size_m_noising_A, tile_size_k_noising_A, r,
-                    pipeline_stages_noising_A, AxEBL_noising_dtype,
-                    kernel_found_noising_a = true;
-                    run_pearl_noising_A_<ElementDenoise_AxEBL, R_, bM_, bK_,
-                                         stages_>(params, stream););
-              } else { kernel_found_noising_a = true; }
+                  if (run_noising_a) {
+                    NOISING_A_CONFIG_SWITCH(
+                        tile_size_m_noising_A, tile_size_k_noising_A, r,
+                        pipeline_stages_noising_A, AxEBL_noising_dtype,
+                        kernel_found_noising_a = true;
+                        run_pearl_noising_A_<ElementDenoise_AxEBL, R_, bM_,
+                                             bK_, stages_>(params, stream););
+                  } else { kernel_found_noising_a = true; }
 
-              if (run_noising_b) {
-                NOISING_B_CONFIG_SWITCH(
-                    tile_size_n_noising_B, tile_size_k_noising_B, r,
-                    pipeline_stages_noising_B, EARxBpEB_noising_dtype,
-                    kernel_found_noising_b = true;
-                    run_pearl_noising_B_<ElementDenoise_EARxBpEB, R_, bN_, bK_,
-                                         stages_>(params, stream););
-              } else { kernel_found_noising_b = true; }
+                  if (run_noising_b) {
+                    NOISING_B_CONFIG_SWITCH(
+                        tile_size_n_noising_B, tile_size_k_noising_B, r,
+                        pipeline_stages_noising_B, EARxBpEB_noising_dtype,
+                        kernel_found_noising_b = true;
+                        run_pearl_noising_B_<ElementDenoise_EARxBpEB, R_, bN_,
+                                             bK_, stages_>(params, stream););
+                  } else { kernel_found_noising_b = true; }
 
-              if (do_denoise_conversion) {
-                if (params.r == 64) {
-                  run_denoise_converter<64>(params, stream);
-                } else if (params.r == 128) {
-                  run_denoise_converter<128>(params, stream);
-                } else {
-                  TORCH_CHECK(false,
-                              "No denoise converter kernel found with "
-                              "given config: R = ",
-                              r);
-                }
-              } MATMUL_CONFIG_SWITCH(bM, bN, bK, r, pipeline_stages, cM, cN,
-                                     kernel_found_matmul = true;
-                                     run_pearl_gemm_<
-                                         ElementOut, R_, bM_, bN_, bK_, stages_,
-                                         cM_, cN_, SkipReduction, SkipDenoising,
-                                         EnableDebug>(params, stream);););););
+                  if (do_denoise_conversion) {
+                    if (params.r == 64) {
+                      run_denoise_converter<64>(params, stream);
+                    } else if (params.r == 128) {
+                      run_denoise_converter<128>(params, stream);
+                    } else {
+                      TORCH_CHECK(false,
+                                  "No denoise converter kernel found with "
+                                  "given config: R = ",
+                                  r);
+                    }
+                  } MATMUL_CONFIG_SWITCH(
+                      bM, bN, bK, r, pipeline_stages, cM, cN,
+                      kernel_found_matmul = true;
+                      run_pearl_gemm_<ElementOut, R_, bM_, bN_, bK_, stages_,
+                                      cM_, cN_, SkipReduction, SkipDenoising,
+                                      EnableDebug, MineOnly>(params, stream););
+                  );
+              );
+          );
+      );
 
   TORCH_CHECK(kernel_found_matmul,
               "No noisy_gemm kernel found with given config: ", "bM = ", bM,
               ", bN = ", bN, ", bK = ", bK, ", R = ", r,
               ", stages = ", pipeline_stages, ", cM = ", cM, ", cN = ", cN,
               ", SkipReduction = ", skip_reduction ? "true" : "false",
-              ", SkipDenoising = ", skip_denoising ? "true" : "false",
+              ", SkipDenoising = ",
+              effective_skip_denoising ? "true" : "false",
+              ", MineOnly = ", mine_only ? "true" : "false",
               ", DebugMode = ", enable_debug ? "true" : "false",
               ", AxEBL of type ", c10::toString(AxEBL_noising_dtype),
               ", EARxBpEB of type ", c10::toString(EARxBpEB_noising_dtype));
@@ -1194,6 +1205,7 @@ TORCH_LIBRARY(pearl_gemm, m) {
       "    bool run_noising_B = False, "
       "    bool skip_reduction = True, "
       "    bool skip_denoising = False, "
+      "    bool mine_only = False, "
       "    Tensor(inner_hash_counter!)? inner_hash_counter = None, "
       "    bool enable_debug = False"
       ") -> ()",

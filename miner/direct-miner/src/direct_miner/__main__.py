@@ -56,6 +56,12 @@ def main():
              "Costs ~20%% throughput; use when validating new code "
              "paths or investigating cache/proof behaviour."
     )
+    parser.add_argument(
+        "--enable-headless-kernel", action="store_true",
+        help="enable the mine-only GEMM kernel path. This skips "
+             "denoising, output scaling, and C stores while preserving "
+             "the PoW signal/proof path."
+    )
     args = parser.parse_args()
 
     setup_logging(args.log_level)
@@ -69,6 +75,7 @@ def main():
         phase_tag=args.phase_tag,
         enable_b_cache=args.enable_b_cache,
         enable_diagnostics=args.enable_diagnostics,
+        enable_headless_kernel=args.enable_headless_kernel,
     )
 
     miner = DirectMiner(config)

@@ -73,5 +73,10 @@ class MinerConfig:
     # cache behaviour.
     enable_diagnostics: bool = False
 
+    # Headless mining kernel path. When enabled, the main GEMM still
+    # computes the mining transcript and writes HostSignalHeader on a
+    # win, but skips denoising, output scaling, and C stores.
+    enable_headless_kernel: bool = False
+
 
 DEFAULT_CONFIG: Final = MinerConfig()

@@ -161,7 +161,8 @@ class DirectMiner:
         logger.info(
             f"Direct miner initialized. "
             f"outer_tiles_per_matmul={self._outer_tiles_per_matmul} "
-            f"max_in_flight={self.config.max_in_flight}"
+            f"max_in_flight={self.config.max_in_flight} "
+            f"headless_kernel={self.config.enable_headless_kernel}"
         )
 
     def run(self) -> None:
@@ -327,6 +328,7 @@ class DirectMiner:
                 a_generator=generator,
                 submit_block=True,
                 on_callback_done=release_this_slot,
+                mine_only=self.config.enable_headless_kernel,
             )
         except UnsafeSlotReleaseError:
             # Cleanup couldn't prove the GPU is idle, so the slot was

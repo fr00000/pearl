@@ -16,7 +16,8 @@ using namespace cute;
 template <typename ElementIn_, typename ElementOut_, typename ElementDenoise_,
           typename ElementScale_, typename TileShape_MNKR_, bool Is_Even_M_,
           bool Is_Even_N_, int cM_, int cN_, bool SkipReduction_,
-          bool SkipDenoising_, int kStages_, bool EnableDebug_>
+          bool SkipDenoising_, int kStages_, bool EnableDebug_,
+          bool MineOnly_ = false>
 struct KernelTraits {
 
   using ElementIn = ElementIn_;
@@ -33,6 +34,7 @@ struct KernelTraits {
   static constexpr bool Is_Even_N = Is_Even_N_;
   static constexpr bool SkipReduction = SkipReduction_;
   static constexpr bool SkipDenoising = SkipDenoising_;
+  static constexpr bool MineOnly = MineOnly_;
   static constexpr int kStages = kStages_;
   static constexpr bool EnableDebug = EnableDebug_;
   static constexpr int srcLane = 0;

@@ -366,6 +366,7 @@ def noisy_gemm(
     run_noising_B: bool = True,
     skip_reduction: bool = False,
     skip_denoising: bool = False,
+    mine_only: bool = False,
     inner_hash_counter: torch.Tensor | None = None,
     enable_debug: bool = False,
 ):
@@ -443,6 +444,10 @@ def noisy_gemm(
         run_noising_B: If False, skip noise_B (default True).
         skip_reduction: Whether to disable the extraction step.
         skip_denoising: Whether to disable the denoising epilogue.
+        mine_only: Whether to run only the mining transcript and PoW
+            signal path. When True, the kernel skips denoising, output
+            scaling, and C stores. The C argument is still accepted for
+            API compatibility but is not written.
         inner_hash_counter: Optional tensor to count inner hashes (for testing/debugging).
         enable_debug: If True, enables debug mode for inner hash counting validation.
     """
@@ -490,6 +495,7 @@ def noisy_gemm(
         run_noising_B,
         skip_reduction,
         skip_denoising,
+        mine_only,
         inner_hash_counter,
         enable_debug,
     )
@@ -541,6 +547,7 @@ def _abstract_noisy_gemm(
     run_noising_B=True,
     skip_reduction=False,
     skip_denoising=False,
+    mine_only=False,
     inner_hash_counter=None,
     enable_debug=False,
 ):

@@ -209,6 +209,7 @@ def pearl_gemm_noisy_phase_c(
     a_generator: Optional[torch.Generator] = None,
     submit_block: bool = True,
     on_callback_done: Optional[Callable[[], None]] = None,
+    mine_only: bool = False,
 ) -> tuple[torch.Tensor, bool, torch.cuda.Event]:
     """Phase C multi-stream cached call.
 
@@ -454,7 +455,8 @@ def pearl_gemm_noisy_phase_c(
                 run_noising_A=True,
                 run_noising_B=run_noising_B,
                 skip_reduction=False,
-                skip_denoising=False,
+                skip_denoising=mine_only,
+                mine_only=mine_only,
             )
 
         completion_event = torch.cuda.Event()
@@ -537,6 +539,7 @@ def pearl_gemm_noisy_cached(
     settings,
     b_cache: Optional[BSideCache] = None,
     submit_block: bool = True,
+    mine_only: bool = False,
 ) -> tuple[torch.Tensor, bool]:
     """Phase B single-stream cached call. Kept for profile_run.py."""
     assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
@@ -698,7 +701,8 @@ def pearl_gemm_noisy_cached(
         run_noising_A=True,
         run_noising_B=run_noising_B,
         skip_reduction=False,
-        skip_denoising=False,
+        skip_denoising=mine_only,
+        mine_only=mine_only,
     )
 
     if b_cache is not None and cached is None:
