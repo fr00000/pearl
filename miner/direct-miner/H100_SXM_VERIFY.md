@@ -29,9 +29,9 @@ uv run direct-miner \
   --kernel-cluster-n 1
 ```
 
-Confirmed 5-minute rate: **2,503,688 raw outer-tiles/s per GPU**, which is
-also **2,503,688 normalized 128-tile-equivalent attempts/s**. The startup
-scripts use this by default.
+Confirmed 5-minute rate: **2,506,384 raw outer-tiles/s per GPU**, which is
+also **2,506,384 normalized 128-tile-equivalent attempts/s** for this
+`tile_m=128` kernel. The startup scripts use this shape by default.
 
 ## Results
 
@@ -573,6 +573,69 @@ Recommended production kernel flags:
 --kernel-cluster-n 1
 ```
 
-Do not pass `--kernel-mma-registers` for the production default yet. The
-`regs=160` 128-row variant was only a tiny one-minute improvement over default
-and has not been five-minute confirmed.
+## Five-minute focused kernel sweep
+
+On 2026-05-15 we ran a 5-minute-per-cell sweep around the current production
+winner on the H100 pod:
+
+```text
+m=8192 n=524032 k=8192
+max_in_flight=4
+headless kernel enabled
+B-cache enabled
+```
+
+The sweep logs and CSV were written on the pod under:
+
+```text
+/workspace/sweeps/kernel-h100-20260515-151433/
+```
+
+The miner now reports two rates:
+
+- `raw_outer_tile_rate`: CTA/outer-tile completions per second.
+- `normalized_attempt_rate`: protocol-comparable 128-equivalent PoW attempts/s.
+
+For `tile_m=128`, these are equal. For `tile_m=64`, normalized attempts are
+half the raw outer-tile rate because the CTA has only 128 MMA consumer threads
+instead of 256.
+
+| Variant | Normalized attempts/s | Delta vs prod default | Notes |
+|---|---:|---:|---|
+| `128x256x128 s3 c2x1 regs=160` | 2,517,887 | +0.46% | best measured, too small to promote |
+| `128x256x128 s3 c2x1 default regs` | 2,506,384 | baseline | current production |
+| `128x256x128 s3 c2x1 regs=224` | 2,506,873 | +0.02% | noise-level |
+| `128x256x128 s3 c2x1 regs=192` | 2,504,536 | -0.07% | noise-level |
+| `128x256x128 s4 c2x1` | 2,477,460 | -1.15% | deeper pipeline loses |
+| `128x256x128 s3 c1x2` | 2,404,479 | -4.07% | N-cluster loses |
+| `128x256x128 s4 c2x2` | 2,393,608 | -4.50% | N-cluster loses |
+| `128x256x128 s3 c2x2` | 2,391,764 | -4.57% | N-cluster loses |
+| `128x256x128 s4 c1x2` | 2,391,065 | -4.60% | N-cluster loses |
+| `128x256x128 s3 c1x1` | 2,302,027 | -8.15% | confirms `c2x1` is real |
+| `128x256x128 s4 c1x1` | 2,201,806 | -12.15% | loses |
+| `128x256x64 s4 c2x1` | 2,153,057 | -14.10% | shorter K tile loses |
+| `128x256x64 s3 c1x1` | 2,084,854 | -16.82% | shorter K tile loses |
+| `128x256x64 s3 c2x1` | 2,083,953 | -16.86% | shorter K tile loses |
+
+Skipped/guard cells:
+
+- `128x256x128 s5 c1x1` failed the pattern-inspector launch because the
+  kernel requested 246,784 bytes of shared memory, above the device limit
+  reported to that launch path.
+- `64x256x128 s3 c1x1/c2x1` passed pattern inspection but did not emit FINAL
+  lines before timeout cleanup. Their steady-state logs still showed the
+  normalized-accounting issue clearly: `c2x1` ran about **3.51M raw outer
+  tiles/s** but only **1.76M normalized attempts/s**, roughly **30% below**
+  the 128-row production kernel.
+
+Conclusion:
+
+- Keep production on `128x256x128, stages=3, cluster=2x1`.
+- Do **not** make `--kernel-mma-registers 160` the default yet. It was the best
+  5-minute cell, but only by +0.46%, which is below the threshold where the
+  operational risk and extra config surface are worth it.
+- Do not pursue `tile_k=64`, `cluster_n=2`, or `stages=4` for this production
+  shape.
+- Do not sweep `tile_n=128/512` as a simple runtime setting. The default proof
+  column pattern reaches columns 248/249, so non-256 N tiles need a separate
+  proof-pattern design before they can be production candidates.

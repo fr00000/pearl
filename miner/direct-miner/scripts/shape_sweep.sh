@@ -4,11 +4,12 @@
 # Runs each shape for $DURATION_S in Phase C production mode
 # (--enable-b-cache --max-in-flight 4; diagnostics off by default
 # since the rename of --no-diagnostics → --enable-diagnostics) and
-# emits a CSV summary with measured throughput + tile rate.
+# emits a CSV summary with measured throughput + normalized attempt rate.
 #
-# Tile rate (= matmuls/s × outer_tiles/matmul) is the metric we
-# optimize, not raw matmul rate. Each tile is an independent
-# winning-hash candidate.
+# Raw outer-tile rate is CTA completions per second. Normalized attempt
+# rate scales that by the number of MMA consumer threads per CTA so
+# tile_m=64 and tile_m=128 are compared by protocol-equivalent lottery
+# tickets, not by misleading CTA counts.
 #
 # Individual shape failures (OOM, sanity_check, kernel mismatch) are
 # expected on the largest candidates; the sweep records them and
@@ -32,7 +33,7 @@ fi
 OUTDIR="/workspace/shape-sweep-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$OUTDIR"
 SUMMARY="$OUTDIR/summary.csv"
-echo "shape_id,m,n,k,outer_tiles_per_matmul,duration_s,total_matmuls,completion_rate_mm_s,tile_rate_per_s,cache_hits,cache_misses,errors,notes" > "$SUMMARY"
+echo "shape_id,m,n,k,outer_tiles_per_matmul,normalized_attempts_per_matmul,duration_s,total_matmuls,completion_rate_mm_s,raw_outer_tile_rate_per_s,normalized_attempt_rate_per_s,cache_hits,cache_misses,errors,notes" > "$SUMMARY"
 
 # Shape list: id|m|n|k
 SHAPES=(
@@ -108,6 +109,7 @@ for entry in "${SHAPES[@]}"; do
     final_line=$(grep "DIRECT MINER\] FINAL" "$log" | tail -1)
     otpm_line=$(grep "outer_tiles_per_matmul=" "$log" | head -1)
     otpm=$(echo "$otpm_line" | grep -oP "outer_tiles_per_matmul=\K[0-9]+")
+    napm=$(echo "$otpm_line" | grep -oP "normalized_attempts_per_matmul=\K[0-9.]+")
     bcache_line=$(grep "BCACHE FINAL" "$log" | tail -1)
     # grep -c always prints the count (including 0) to stdout; its exit
     # code is 1 on zero matches. Do not chain `|| echo 0` — that prints
@@ -121,14 +123,15 @@ for entry in "${SHAPES[@]}"; do
         if grep -q "AssertionError\|sanity\|must be" "$log"; then notes="${notes:+$notes;}sanity"; fi
         if grep -q "Traceback" "$log" && [[ -z "$notes" ]]; then notes="exception"; fi
         notes="${notes:-no_final}"
-        echo "${shape_id},${m},${n},${k},${otpm:-},${DURATION_S},,,,,,${errors},${notes}" >> "$SUMMARY"
+        echo "${shape_id},${m},${n},${k},${otpm:-},${napm:-},${DURATION_S},,,,,,,${errors},${notes}" >> "$SUMMARY"
         continue
     fi
 
     completed=$(echo "$final_line" | grep -oP "completed=\K[0-9]+")
     elapsed=$(echo "$final_line" | grep -oP "elapsed=\K[0-9.]+")
     comp_rate=$(echo "$final_line" | grep -oP "completion_rate=\K[0-9.]+")
-    tile_rate=$(echo "$final_line" | grep -oP "tile_rate=\K[0-9]+")
+    raw_outer_tile_rate=$(echo "$final_line" | grep -oP "raw_outer_tile_rate=\K[0-9]+")
+    normalized_attempt_rate=$(echo "$final_line" | grep -oP "normalized_attempt_rate=\K[0-9]+")
 
     if [[ -n "$bcache_line" ]]; then
         cache_hits=$(echo "$bcache_line" | grep -oP "hits=\K[0-9]+")
@@ -138,8 +141,8 @@ for entry in "${SHAPES[@]}"; do
         cache_misses=""
     fi
 
-    echo "  -> ${completed} matmuls in ${elapsed}s = ${comp_rate} mm/s, ${tile_rate} tiles/s, errors=${errors}"
-    echo "${shape_id},${m},${n},${k},${otpm},${elapsed},${completed},${comp_rate},${tile_rate},${cache_hits},${cache_misses},${errors}," >> "$SUMMARY"
+    echo "  -> ${completed} matmuls in ${elapsed}s = ${comp_rate} mm/s, ${normalized_attempt_rate} attempts/s (${raw_outer_tile_rate} raw outer tiles/s), errors=${errors}"
+    echo "${shape_id},${m},${n},${k},${otpm},${napm},${elapsed},${completed},${comp_rate},${raw_outer_tile_rate},${normalized_attempt_rate},${cache_hits},${cache_misses},${errors}," >> "$SUMMARY"
 done
 
 echo ""

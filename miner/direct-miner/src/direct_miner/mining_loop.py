@@ -2,7 +2,6 @@
 multi-stream A-side overlap."""
 
 import logging
-import math
 import time
 from typing import Optional
 
@@ -21,6 +20,12 @@ from vllm_miner.mining_state import (
 )
 
 from .a_slot_pool import ASlotPool, SlotAcquireTimeout
+from .attempt_metrics import (
+    mma_consumer_threads_per_cta,
+    normalized_attempts_per_matmul,
+    normalized_attempt_scale,
+    outer_tiles_per_matmul,
+)
 from .b_cache import BSideCache
 from .completion_tracker import CompletionTracker
 from .config import MinerConfig
@@ -75,9 +80,25 @@ class DirectMiner:
         self.stream_prep: Optional[torch.cuda.Stream] = None
         self.a_pool: Optional[ASlotPool] = None
 
-        self._outer_tiles_per_matmul = (
-            math.ceil(config.shapes.m / config.kernel_tile_size_m) *
-            math.ceil(config.shapes.n / config.kernel_tile_size_n)
+        self._outer_tiles_per_matmul = outer_tiles_per_matmul(
+            m=config.shapes.m,
+            n=config.shapes.n,
+            tile_m=config.kernel_tile_size_m,
+            tile_n=config.kernel_tile_size_n,
+        )
+        self._attempt_scale = normalized_attempt_scale(
+            tile_m=config.kernel_tile_size_m
+        )
+        self._mma_threads_per_cta = mma_consumer_threads_per_cta(
+            tile_m=config.kernel_tile_size_m
+        )
+        self._normalized_attempts_per_matmul = (
+            normalized_attempts_per_matmul(
+                m=config.shapes.m,
+                n=config.shapes.n,
+                tile_m=config.kernel_tile_size_m,
+                tile_n=config.kernel_tile_size_n,
+            )
         )
 
         self._start_time: float = 0.0
@@ -157,6 +178,10 @@ class DirectMiner:
         logger.info(
             f"Direct miner initialized. "
             f"outer_tiles_per_matmul={self._outer_tiles_per_matmul} "
+            f"mma_threads_per_cta={self._mma_threads_per_cta} "
+            f"attempt_scale={self._attempt_scale:.3f} "
+            f"normalized_attempts_per_matmul="
+            f"{self._normalized_attempts_per_matmul:.1f} "
             f"max_in_flight={self.config.max_in_flight} "
             f"headless_kernel={self.config.enable_headless_kernel} "
             f"kernel={self.config.kernel_tile_size_m}x"
@@ -397,17 +422,27 @@ class DirectMiner:
             launched_delta / elapsed_interval if elapsed_interval > 0 else 0
         )
 
-        instant_tile_rate = instant_completion_rate * self._outer_tiles_per_matmul
-        cumulative_tile_rate = (
+        instant_outer_tile_rate = (
+            instant_completion_rate * self._outer_tiles_per_matmul
+        )
+        cumulative_outer_tile_rate = (
             cumulative_completion_rate * self._outer_tiles_per_matmul
+        )
+        instant_attempt_rate = (
+            instant_completion_rate * self._normalized_attempts_per_matmul
+        )
+        cumulative_attempt_rate = (
+            cumulative_completion_rate * self._normalized_attempts_per_matmul
         )
 
         logger.info(
             f"[DIRECT MINER] completed={completed} "
             f"({cumulative_completion_rate:.1f}/s avg, "
             f"{instant_completion_rate:.1f}/s now) "
-            f"tiles=({cumulative_tile_rate:.0f}/s avg, "
-            f"{instant_tile_rate:.0f}/s now) "
+            f"outer_tiles=({cumulative_outer_tile_rate:.0f}/s avg, "
+            f"{instant_outer_tile_rate:.0f}/s now raw) "
+            f"attempts=({cumulative_attempt_rate:.0f}/s avg, "
+            f"{instant_attempt_rate:.0f}/s now 128eq) "
             f"launched={self._launch_count} "
             f"(launch_rate={instant_launch_rate:.1f}/s) "
             f"in_flight={in_flight}"
@@ -437,12 +472,14 @@ class DirectMiner:
         elapsed = time.time() - self._start_time
         completed = self.tracker.completed_count
         rate = completed / elapsed if elapsed > 0 else 0
-        tile_rate = rate * self._outer_tiles_per_matmul
+        raw_outer_tile_rate = rate * self._outer_tiles_per_matmul
+        normalized_attempt_rate = rate * self._normalized_attempts_per_matmul
         logger.info(
             f"[DIRECT MINER] FINAL: completed={completed} "
             f"launched={self._launch_count} elapsed={elapsed:.1f}s "
             f"completion_rate={rate:.1f}/s "
-            f"tile_rate={tile_rate:.0f}/s"
+            f"raw_outer_tile_rate={raw_outer_tile_rate:.0f}/s "
+            f"normalized_attempt_rate={normalized_attempt_rate:.0f}/s"
         )
         if self.b_cache is not None:
             if self.diagnostics is not None:
