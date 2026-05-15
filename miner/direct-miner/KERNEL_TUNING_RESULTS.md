@@ -168,3 +168,48 @@ Results on the H100 pod:
 
 Conclusion: the compile-time split recovers the disabled-path regression within
 measurement noise of the original production reference.
+
+## 2026-05-15 Production-Shape Hash Distribution
+
+After the compile-time diagnostics split, a bounded production-shape
+observability run checked whether the kernel is producing the expected lottery
+tickets and hash distribution:
+
+```bash
+timeout -s INT 240s uv run --no-sync direct-miner \
+  --m 8192 --n 524032 --k 8192 \
+  --max-in-flight 4 \
+  --enable-b-cache \
+  --enable-headless-kernel \
+  --enable-diagnostics \
+  --enable-kernel-hash-stats \
+  --metrics-output /workspace/kernel-hash-prod-constexpr.jsonl \
+  --phase-tag powdiag-prod-shape \
+  --kernel-tile-m 128 --kernel-tile-n 256 --kernel-tile-k 128 \
+  --kernel-stages 3 --kernel-cluster-m 2 --kernel-cluster-n 1
+```
+
+The stats path is intentionally slow because it adds atomics to the PoW hot
+path. The run completed 423 matmuls in 235.0s, so its throughput is not a
+production benchmark.
+
+Observed distribution:
+
+| Metric | Value |
+|---|---:|
+| matmul records | 423 |
+| kernel attempts per matmul | 33,538,048 |
+| attempts formula | `131,008 CTAs * 256 MMA threads` |
+| `log2(attempts_per_matmul)` | 24.999 |
+| mean best hash log2 | 230.172 |
+| expected mean best hash log2 | 230.168 |
+| median best hash log2 | 230.502 |
+| best hash log2 over run | 223.427 |
+| expected best hash log2 over run | 221.443 |
+| best margin over target | 16.410 log2 |
+
+Conclusion: production-shape kernel hash behavior is statistically sane. The
+attempt count exactly matches the expected CTA/thread geometry, and the mean
+best observed hash is essentially equal to the random-hash expectation. Future
+kernel work can focus on speed rather than a suspected lottery-ticket
+correctness issue.

@@ -717,3 +717,25 @@ uv pip install --no-build-isolation -e miner/pearl-gemm
 
 Conclusion: compile-time diagnostics recover the disabled-path regression to
 within measurement noise of the original production reference.
+
+Production-shape hash distribution check:
+
+- Ran a bounded 240-second observability sample with the production shape and
+  kernel settings: `m=8192 n=524032 k=8192`, B-cache, headless,
+  `max_in_flight=4`, `128x256x128`, `stages=3`, `cluster=2x1`.
+- The stats path is intentionally slow because it adds atomics to the PoW hot
+  path; this run is a distribution check, not a throughput benchmark.
+- Completed 423 matmul records in 235.0s.
+- Every record reported `kernel_hash_attempts=33,538,048`, equal to
+  `131,008` CTAs × `256` MMA consumer threads.
+- Mean best hash log2 was `230.172`; random-hash expectation for
+  `33,538,048` attempts is `230.168`.
+- Best hash log2 over the run was `223.427`; expected run-best across all
+  sampled attempts is about `221.443`, comfortably plausible for this sample
+  size.
+- Best observed margin over target was `16.410 log2`.
+
+Conclusion: production-shape kernel hash behavior is statistically sane. The
+kernel is producing the expected number of lottery tickets, and their quality
+matches the random-hash expectation closely enough that future kernel work
+should focus on speed, not lottery-ticket correctness.
