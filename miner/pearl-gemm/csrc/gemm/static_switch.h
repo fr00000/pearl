@@ -61,12 +61,13 @@
 #define DEBUG_MODE_SWITCH FALSE_SWITCH
 #endif
 
-#define MATMUL_CONFIG_OPTION(BM_VAR, BN_VAR, BK_VAR, R_VAR, STAGES_VAR,     \
-                             cM_VAR, cN_VAR, BM_VAL, BN_VAL, BK_VAL, R_VAL, \
-                             STAGES_VAL, cM_VAL, cN_VAL, ...)               \
+#define MATMUL_CONFIG_OPTION(                                               \
+    BM_VAR, BN_VAR, BK_VAR, R_VAR, STAGES_VAR, cM_VAR, cN_VAR,              \
+    MMA_REGS_VAR, BM_VAL, BN_VAL, BK_VAL, R_VAL, STAGES_VAL, cM_VAL,        \
+    cN_VAL, MMA_REGS_VAL, ...)                                              \
   if (R_VAR == R_VAL && BM_VAR == BM_VAL && BN_VAR == BN_VAL &&             \
       BK_VAR == BK_VAL && STAGES_VAR == STAGES_VAL && cM_VAR == cM_VAL &&   \
-      cN_VAR == cN_VAL) {                                                   \
+      cN_VAR == cN_VAL && MMA_REGS_VAR == MMA_REGS_VAL) {                   \
     static constexpr int bM_ = BM_VAL;                                      \
     static constexpr int bN_ = BN_VAL;                                      \
     static constexpr int bK_ = BK_VAL;                                      \
@@ -74,6 +75,7 @@
     static constexpr int stages_ = STAGES_VAL;                              \
     static constexpr int cM_ = cM_VAL;                                      \
     static constexpr int cN_ = cN_VAL;                                      \
+    static constexpr int mma_registers_ = MMA_REGS_VAL;                     \
     __VA_ARGS__;                                                            \
   }
 

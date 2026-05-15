@@ -22,16 +22,17 @@ def write_matmul_switch(filename: str | Path, kernel_configs: list[MatmulKernelC
         fh.write(
             "/* Do not edit -- programmatically generated from build_utils/write_static_switches.py. */\n"
             "#define MATMUL_CONFIG_SWITCH(BM_VAR, BN_VAR, BK_VAR, R_VAR, "
-            "STAGES_VAR, cM_VAR, cN_VAR, ...) \\\n"
+            "STAGES_VAR, cM_VAR, cN_VAR, MMA_REGS_VAR, ...) \\\n"
         )
         fh.write("\tdo { \\\n")
         for config in kernel_configs:
             fh.write(
                 f"\t\tMATMUL_CONFIG_OPTION(BM_VAR, BN_VAR, BK_VAR, R_VAR, "
-                f"STAGES_VAR, cM_VAR, cN_VAR, "
+                f"STAGES_VAR, cM_VAR, cN_VAR, MMA_REGS_VAR, "
                 f"{config.tile_size_m}, {config.tile_size_n}, "
                 f"{config.tile_size_k}, {config.R}, {config.pipeline_stages}, "
-                f"{config.cM}, {config.cN}, __VA_ARGS__); \\\n"
+                f"{config.cM}, {config.cN}, {config.mma_registers}, "
+                f"__VA_ARGS__); \\\n"
             )
         fh.write("\t} while(0)\n")
 

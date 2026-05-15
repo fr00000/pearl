@@ -352,6 +352,7 @@ def noisy_gemm(
     cluster_size_m: int = 1,
     cluster_size_n: int = 1,
     pipeline_stages: int | None = None,
+    mma_registers: int | None = None,
     swizzle: int | None = None,
     swizzle_n_maj: bool = True,
     tile_size_m_noising_A: int | None = None,
@@ -366,6 +367,7 @@ def noisy_gemm(
     run_noising_B: bool = True,
     skip_reduction: bool = False,
     skip_denoising: bool = False,
+    mine_only: bool = False,
     inner_hash_counter: torch.Tensor | None = None,
     enable_debug: bool = False,
 ):
@@ -417,6 +419,8 @@ def noisy_gemm(
         tile_size_n: Allowed values are [64, 128, 192, 256].
         pipeline_stages: The number of stages in the mainloop pipeline.
             If None, pick the largest number that fits in SMEM, up to 5.
+        mma_registers: Optional explicit warpgroup register allocation for
+            the main mining/GEMM kernel. None uses the compiled default.
         cluster_size_m: Number of CTAs in cluster in M direction.
         cluster_size_n: Number of CTAs in cluster in N direction.
         swizzle: We assign (tile_size_m x tile_size_n) output tiles to
@@ -443,6 +447,10 @@ def noisy_gemm(
         run_noising_B: If False, skip noise_B (default True).
         skip_reduction: Whether to disable the extraction step.
         skip_denoising: Whether to disable the denoising epilogue.
+        mine_only: Whether to run only the mining transcript and PoW
+            signal path. When True, the kernel skips denoising, output
+            scaling, and C stores. The C argument is still accepted for
+            API compatibility but is not written.
         inner_hash_counter: Optional tensor to count inner hashes (for testing/debugging).
         enable_debug: If True, enables debug mode for inner hash counting validation.
     """
@@ -476,6 +484,7 @@ def noisy_gemm(
         cluster_size_m,
         cluster_size_n,
         pipeline_stages,
+        mma_registers,
         swizzle,
         swizzle_n_maj,
         tile_size_m_noising_A,
@@ -490,6 +499,96 @@ def noisy_gemm(
         run_noising_B,
         skip_reduction,
         skip_denoising,
+        mine_only,
+        inner_hash_counter,
+        enable_debug,
+    )
+
+
+def headless_mine(
+    A,  # m x k
+    B,  # n x k
+    EAL,  # m x r
+    EAL_fp16,
+    EBR,  # n x r
+    EBR_fp16,
+    EAR_R_major,  # k x r
+    EBL_R_major,  # k x r
+    EAR_K_major,  # r x k
+    EBL_K_major,  # r x k
+    AxEBL_fp16,  # m x r
+    EARxBpEB_fp16,  # n x r
+    ApEA,  # m x k
+    BpEB,  # n x k
+    host_signal_header_pinned,  # host_signal_header_size
+    host_signal_sync,  # host_signal_sync_size
+    pow_target: torch.Tensor,  # (8,) uint32, PoW target
+    pow_key: torch.Tensor,  # (8,) uint32, PoW key
+    AxEBL_int32=None,  # m x r
+    EARxBpEB_int32=None,  # n x r
+    tile_size_m: int = 128,
+    tile_size_n: int = 256,
+    tile_size_k: int = 128,
+    cluster_size_m: int = 1,
+    cluster_size_n: int = 1,
+    pipeline_stages: int | None = None,
+    mma_registers: int | None = None,
+    swizzle: int | None = None,
+    swizzle_n_maj: bool = True,
+    tile_size_m_noising_A: int | None = None,
+    tile_size_n_noising_B: int | None = None,
+    tile_size_k_noising_A: int | None = None,
+    tile_size_k_noising_B: int | None = None,
+    pipeline_stages_noising_A: int = 2,
+    pipeline_stages_noising_B: int = 2,
+    k_blocks_per_split_noising_A: int | None = None,
+    k_blocks_per_split_noising_B: int | None = None,
+    run_noising_A: bool = True,
+    run_noising_B: bool = True,
+    inner_hash_counter: torch.Tensor | None = None,
+    enable_debug: bool = False,
+):
+    """Run noising plus the mining transcript/PoW path without C output."""
+    pearl_gemm_cuda.headless_mine(
+        A,
+        B,
+        EAL,
+        EAL_fp16,
+        EBR,
+        EBR_fp16,
+        EAR_R_major,
+        EBL_R_major,
+        EAR_K_major,
+        EBL_K_major,
+        AxEBL_fp16,
+        EARxBpEB_fp16,
+        ApEA,
+        BpEB,
+        host_signal_header_pinned,
+        host_signal_sync,
+        pow_target,
+        pow_key,
+        AxEBL_int32,
+        EARxBpEB_int32,
+        tile_size_m,
+        tile_size_n,
+        tile_size_k,
+        cluster_size_m,
+        cluster_size_n,
+        pipeline_stages,
+        mma_registers,
+        swizzle,
+        swizzle_n_maj,
+        tile_size_m_noising_A,
+        tile_size_n_noising_B,
+        tile_size_k_noising_A,
+        tile_size_k_noising_B,
+        pipeline_stages_noising_A,
+        pipeline_stages_noising_B,
+        k_blocks_per_split_noising_A,
+        k_blocks_per_split_noising_B,
+        run_noising_A,
+        run_noising_B,
         inner_hash_counter,
         enable_debug,
     )
@@ -527,6 +626,7 @@ def _abstract_noisy_gemm(
     cluster_size_m=1,
     cluster_size_n=1,
     pipeline_stages=None,
+    mma_registers=None,
     swizzle=None,
     swizzle_n_maj=True,
     tile_size_m_noising_A=None,
@@ -541,6 +641,54 @@ def _abstract_noisy_gemm(
     run_noising_B=True,
     skip_reduction=False,
     skip_denoising=False,
+    mine_only=False,
+    inner_hash_counter=None,
+    enable_debug=False,
+):
+    return None
+
+
+@torch.library.register_fake("pearl_gemm::headless_mine")
+def _abstract_headless_mine(
+    A,
+    B,
+    EAL,
+    EAL_fp16,
+    EBR,
+    EBR_fp16,
+    EAR_R_major,
+    EBL_R_major,
+    EAR_K_major,
+    EBL_K_major,
+    AxEBL_fp16,
+    EARxBpEB_fp16,
+    ApEA,
+    BpEB,
+    host_signal_header_pinned,
+    host_signal_sync,
+    pow_target,
+    pow_key,
+    AxEBL_int32=None,
+    EARxBpEB_int32=None,
+    tile_size_m=128,
+    tile_size_n=256,
+    tile_size_k=128,
+    cluster_size_m=1,
+    cluster_size_n=1,
+    pipeline_stages=None,
+    mma_registers=None,
+    swizzle=None,
+    swizzle_n_maj=True,
+    tile_size_m_noising_A=None,
+    tile_size_n_noising_B=None,
+    tile_size_k_noising_A=None,
+    tile_size_k_noising_B=None,
+    pipeline_stages_noising_A=2,
+    pipeline_stages_noising_B=2,
+    k_blocks_per_split_noising_A=None,
+    k_blocks_per_split_noising_B=None,
+    run_noising_A=True,
+    run_noising_B=True,
     inner_hash_counter=None,
     enable_debug=False,
 ):

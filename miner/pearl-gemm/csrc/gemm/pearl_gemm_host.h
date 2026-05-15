@@ -15,8 +15,9 @@
 
 template <class ElementOut_, typename TileShape_MNKR, int KStages_, int cM = 1,
           int cN = 1, bool Is_Even_M = true, bool Is_Even_N = true,
-          bool SkipReduction = false, bool SkipDenoising = false,
-          bool EnableDebug = false>
+          int MmaRegisters = 0, bool SkipReduction = false,
+          bool SkipDenoising = false, bool EnableDebug = false,
+          bool MineOnly = false>
 void run_pearl_gemm(PearlAPIParams const& params, cudaStream_t stream = 0) {
   using namespace cute;
 
@@ -31,7 +32,8 @@ void run_pearl_gemm(PearlAPIParams const& params, cudaStream_t stream = 0) {
   using KTraits =
       pearl::KernelTraits<ElementIn, ElementOut, ElementDenoise, ElementScale,
                           TileShape_MNKR, Is_Even_M, Is_Even_N, cM, cN,
-                          SkipReduction, SkipDenoising, KStages, EnableDebug>;
+                          SkipReduction, SkipDenoising, KStages, EnableDebug,
+                          MmaRegisters, MineOnly>;
   using CollectiveEpilogue = pearl::CollectiveEpilogue<KTraits>;
   typename CollectiveEpilogue::Arguments epilogue_args{
       .ptr_C = static_cast<ElementOut*>(params.ptr_C),
@@ -129,4 +131,105 @@ void run_pearl_gemm(PearlAPIParams const& params, cudaStream_t stream = 0) {
 
   cutlass::launch_kernel_on_cluster(launch_params, kernel, mainloop_params,
                                     epilogue_params, scheduler_params);
+}
+
+template <class ElementOut_, typename TileShape_MNKR, int KStages_, int cM = 1,
+          int cN = 1, bool Is_Even_M = true, bool Is_Even_N = true,
+          int MmaRegisters = 0, bool EnableDebug = false>
+void run_pearl_mine(PearlAPIParams const& params, cudaStream_t stream = 0) {
+  using namespace cute;
+
+  static constexpr int KStages = KStages_;
+  using ElementIn = int8_t;
+  using ElementDenoise = cutlass::half_t;
+  using ElementScale = float;
+  using ElementOut = ElementOut_;
+  static constexpr bool SkipReduction = false;
+  static constexpr bool SkipDenoising = true;
+  static constexpr bool MineOnly = true;
+
+  auto problem_shape = make_shape(params.m, params.n, params.k, params.r);
+
+  using KTraits =
+      pearl::KernelTraits<ElementIn, ElementOut, ElementDenoise, ElementScale,
+                          TileShape_MNKR, Is_Even_M, Is_Even_N, cM, cN,
+                          SkipReduction, SkipDenoising, KStages, EnableDebug,
+                          MmaRegisters, MineOnly>;
+  using CollectiveMainloop = pearl::CollectiveMainloop<KTraits>;
+
+  using ClusterShape = typename KTraits::ClusterShape_MNK;
+  using Scheduler = pearl::SingleTileScheduler;
+  int num_blocks_m = cutlass::ceil_div(params.m, KTraits::bM);
+  int num_blocks_n = cutlass::ceil_div(params.n, KTraits::bN);
+  int num_clusters_m = cutlass::ceil_div(num_blocks_m, size<0>(ClusterShape{}));
+  int num_clusters_n = cutlass::ceil_div(num_blocks_n, size<1>(ClusterShape{}));
+  num_blocks_m = num_clusters_m * size<0>(ClusterShape{});
+  num_blocks_n = num_clusters_n * size<1>(ClusterShape{});
+
+  int swizzle_divisor =
+      params.swizzle_n_maj ? size<1>(ClusterShape{}) : size<0>(ClusterShape{});
+  int swizzle = cutlass::ceil_div(params.swizzle, swizzle_divisor);
+  typename CollectiveMainloop::Arguments mainloop_args{
+      .ptr_A = static_cast<ElementIn*>(params.ptr_ApEA),
+      .ptr_B = static_cast<ElementIn*>(params.ptr_BpEB),
+      .host_signal_header_pinned =
+          static_cast<HostSignalHeader*>(params.host_signal_header_pinned),
+      .host_signal_sync = static_cast<HostSignalSync*>(params.host_signal_sync),
+      .problem_shape = problem_shape,
+      .inner_hash_counter = params.inner_hash_counter,
+      .ptr_pow_target = static_cast<uint32_t const*>(params.ptr_pow_target),
+      .ptr_pow_key = static_cast<uint32_t const*>(params.ptr_pow_key)};
+  typename CollectiveMainloop::Params mainloop_params =
+      CollectiveMainloop::to_underlying_arguments(mainloop_args);
+
+  Scheduler::Arguments scheduler_args = {.num_blocks_m = num_blocks_m,
+                                         .num_blocks_n = num_blocks_n,
+                                         .num_clusters_m = num_clusters_m,
+                                         .num_clusters_n = num_clusters_n,
+                                         .swizzle = swizzle,
+                                         .swizzle_n_maj = params.swizzle_n_maj};
+  Scheduler::Params scheduler_params =
+      Scheduler::to_underlying_arguments(scheduler_args);
+  int device;
+  cudaGetDevice(&device);
+
+  void* kernel = (void*)pearl::hopper_mine_ws<KTraits, Scheduler>;
+  int smem_size = sizeof(typename KTraits::SharedStorage);
+  if (smem_size >= 48 * 1024) {
+    int max_smem_per_block;
+    cudaDeviceGetAttribute(&max_smem_per_block,
+                           cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+
+    cudaError_t attr_result = cudaFuncSetAttribute(
+        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+    if (attr_result != cudaSuccess) {
+      cudaGetLastError();
+      TORCH_CHECK(false,
+                  "Failed to set shared memory size. "
+                  "Requested: ",
+                  smem_size, " bytes (", smem_size / 1024,
+                  " KB), "
+                  "Device limit: ",
+                  max_smem_per_block, " bytes (", max_smem_per_block / 1024,
+                  " KB). "
+                  "Error: ",
+                  cudaGetErrorString(attr_result));
+    }
+  }
+
+  int multiprocessor_count;
+  cudaDeviceGetAttribute(&multiprocessor_count, cudaDevAttrMultiProcessorCount,
+                         device);
+  dim3 grid_dims =
+      Scheduler::get_grid_dim(scheduler_args, multiprocessor_count);
+
+  static constexpr int ctaSize = KTraits::kNumWarps * 32;
+  dim3 block_dims(ctaSize);
+  dim3 cluster_dims(size<0>(ClusterShape{}), size<1>(ClusterShape{}),
+                    size<2>(ClusterShape{}));
+  cutlass::ClusterLaunchParams launch_params{grid_dims, block_dims,
+                                             cluster_dims, smem_size, stream};
+
+  cutlass::launch_kernel_on_cluster(launch_params, kernel, mainloop_params,
+                                    scheduler_params);
 }

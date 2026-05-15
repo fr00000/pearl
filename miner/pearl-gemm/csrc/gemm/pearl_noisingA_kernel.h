@@ -23,7 +23,8 @@ namespace pearl {
 using namespace cute;
 
 template <class TileShape_MRK_, int kNumThreads, class Element,
-          class ElementDenoise, int kStages, bool IsEvenK, bool NoReduction>
+          class ElementDenoise, int kStages, bool IsEvenK, bool NoReduction,
+          bool ComputeAxEBL = true>
 class NoisingKernelA {
 
  public:
@@ -502,14 +503,16 @@ class NoisingKernelA {
         pipeline_a.producer_commit(smem_pipe_write_a, TmaTransactionBytesA);
         ++smem_pipe_write_a;
 
-        pipeline_ebl.producer_acquire(smem_pipe_write_ebl);
-        LoadBarrierType* tmaBarEBL =
-            pipeline_ebl.producer_get_barrier(smem_pipe_write_ebl);
-        copy(params.tma_load_EBL.with(*tmaBarEBL, 0), tEBLgEBL(_, k_block),
-             tEBLsEBL(_, smem_pipe_write_ebl.index()));
-        pipeline_ebl.producer_commit(smem_pipe_write_ebl,
-                                     TmaTransactionBytesEBL);
-        ++smem_pipe_write_ebl;
+        if constexpr (ComputeAxEBL) {
+          pipeline_ebl.producer_acquire(smem_pipe_write_ebl);
+          LoadBarrierType* tmaBarEBL =
+              pipeline_ebl.producer_get_barrier(smem_pipe_write_ebl);
+          copy(params.tma_load_EBL.with(*tmaBarEBL, 0), tEBLgEBL(_, k_block),
+               tEBLsEBL(_, smem_pipe_write_ebl.index()));
+          pipeline_ebl.producer_commit(smem_pipe_write_ebl,
+                                       TmaTransactionBytesEBL);
+          ++smem_pipe_write_ebl;
+        }
       }
     }
   }
@@ -818,11 +821,13 @@ class NoisingKernelA {
     // Issue Tma Descriptor Prefetch from a single thread
     if (warp_idx == 0 && lane_predicate) {
       cute::prefetch_tma_descriptor(params.tma_load_A.get_tma_descriptor());
-      cute::prefetch_tma_descriptor(params.tma_load_EBL.get_tma_descriptor());
       cute::prefetch_tma_descriptor(params.tma_load_EAL.get_tma_descriptor());
       cute::prefetch_tma_descriptor(params.tma_load_EAR.get_tma_descriptor());
-      cute::prefetch_tma_descriptor(
-          params.tma_store_AxEBL.get_tma_descriptor());
+      if constexpr (ComputeAxEBL) {
+        cute::prefetch_tma_descriptor(params.tma_load_EBL.get_tma_descriptor());
+        cute::prefetch_tma_descriptor(
+            params.tma_store_AxEBL.get_tma_descriptor());
+      }
       cute::prefetch_tma_descriptor(params.tma_store_ApEA.get_tma_descriptor());
     }
     // The matrix A is logically partitioned into m/kblockM tiles in the m direction.
@@ -853,7 +858,8 @@ class NoisingKernelA {
         warp_group_idx == 0 ? MainloopLoadPipeline::ThreadCategory::Producer
                             : MainloopLoadPipeline::ThreadCategory::Consumer;
     pipeline_params_a.is_leader = warp_group_thread_idx == 0;
-    pipeline_params_a.num_consumers = kNumMmaThreads * 2;  // Both WGs release A
+    pipeline_params_a.num_consumers =
+        ComputeAxEBL ? kNumMmaThreads * 2 : kNumMmaThreads;
     // We're counting on pipeline to call cutlass::arch::fence_barrier_init();
     MainloopLoadPipeline pipeline_a(shared_storage.pipeline_a,
                                     pipeline_params_a, ClusterShape{});
@@ -862,9 +868,12 @@ class NoisingKernelA {
     LoadPipelineParams pipeline_params_ebl;
     pipeline_params_ebl.transaction_bytes = TmaTransactionBytesEBL;
     pipeline_params_ebl.role =
-        warp_group_idx == 0 ? MainloopLoadPipeline::ThreadCategory::Producer
-        : warp_group_idx == 1
-            ? MainloopLoadPipeline::ThreadCategory::Consumer
+        ComputeAxEBL
+            ? (warp_group_idx == 0
+                   ? MainloopLoadPipeline::ThreadCategory::Producer
+               : warp_group_idx == 1
+                   ? MainloopLoadPipeline::ThreadCategory::Consumer
+                   : MainloopLoadPipeline::ThreadCategory::NonParticipant)
             : MainloopLoadPipeline::ThreadCategory::NonParticipant;
     pipeline_params_ebl.is_leader = warp_group_thread_idx == 0;
     pipeline_params_ebl.num_consumers = kNumMmaThreads;
@@ -915,30 +924,35 @@ class NoisingKernelA {
       } else if (warp_idx_in_warpgroup == 1) {  // Store ApEA warp
         store_ApEA(params, pipeline_apea, shared_storage, m_block, k_block_min,
                    k_block_max);
-        cutlass::arch::NamedBarrier::arrive(
-            kNumAxEBLThreads + kNumApEAStoreThreads,
-            static_cast<uint32_t>(NamedBarriers::AxEBLSMEMReady));
+        if constexpr (ComputeAxEBL) {
+          cutlass::arch::NamedBarrier::arrive(
+              kNumAxEBLThreads + kNumApEAStoreThreads,
+              static_cast<uint32_t>(NamedBarriers::AxEBLSMEMReady));
+        }
       }
     } else if (warp_group_idx == 1) {  // A * EBL
-      cutlass::arch::warpgroup_reg_alloc<kNumAxEBLRegisters>();
-      TiledMmaMRK tiled_mma;
-      // (ATOM, REST_M, REST_R)
-      Tensor tCrAxEBL =
-          partition_fragment_C(tiled_mma, select<0, 1>(TileShape_MRK{}));
-      clear(tCrAxEBL);
+      if constexpr (ComputeAxEBL) {
+        cutlass::arch::warpgroup_reg_alloc<kNumAxEBLRegisters>();
+        TiledMmaMRK tiled_mma;
+        // (ATOM, REST_M, REST_R)
+        Tensor tCrAxEBL =
+            partition_fragment_C(tiled_mma, select<0, 1>(TileShape_MRK{}));
+        clear(tCrAxEBL);
 
-      constexpr int ThreadOffset = kNumThreadsPerWarpGroup;
-      compute_AxEBL(params, pipeline_a, pipeline_ebl, shared_storage, tCrAxEBL,
-                    m_block, k_block_min, k_block_max, tid - ThreadOffset);
+        constexpr int ThreadOffset = kNumThreadsPerWarpGroup;
+        compute_AxEBL(params, pipeline_a, pipeline_ebl, shared_storage,
+                      tCrAxEBL, m_block, k_block_min, k_block_max,
+                      tid - ThreadOffset);
 
-      // AxEBL smem is overlapped via union, so we need to make sure
-      //  it is free. We check this by waiting for the last ApEA out.
-      cutlass::arch::NamedBarrier::sync(
-          kNumAxEBLThreads + kNumApEAStoreThreads,
-          static_cast<uint32_t>(NamedBarriers::AxEBLSMEMReady));
-      // "Epilogue" to store AxEBL
-      store_AxEBL(params, tCrAxEBL, shared_storage, m_block,
-                  tid - ThreadOffset);
+        // AxEBL smem is overlapped via union, so we need to make sure
+        //  it is free. We check this by waiting for the last ApEA out.
+        cutlass::arch::NamedBarrier::sync(
+            kNumAxEBLThreads + kNumApEAStoreThreads,
+            static_cast<uint32_t>(NamedBarriers::AxEBLSMEMReady));
+        // "Epilogue" to store AxEBL
+        store_AxEBL(params, tCrAxEBL, shared_storage, m_block,
+                    tid - ThreadOffset);
+      }
     } else if (warp_group_idx == 2) {  // A + EAL * EAR
       cutlass::arch::warpgroup_reg_alloc<kNumApEARegisters>();
 

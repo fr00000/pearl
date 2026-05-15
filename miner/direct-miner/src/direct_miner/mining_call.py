@@ -19,9 +19,11 @@ sync if the protocol changes.
 Slot-pool tensors are owned by the caller's ASlotPool. This function
 WRITES into slot.A, slot.A_scales (via make_synthetic_a_into),
 slot.A_tensor_hash, slot.commitment_hash_A, slot.EAL, slot.EAR_*,
-slot.host_signal_sync, slot.C; READS from slot.tensor_hash_scratchpad.
+slot.host_signal_sync, and slot.C when not using the headless kernel;
+READS from slot.tensor_hash_scratchpad.
 
-Returns (slot.C, b_cache_hit, completion_event). The completion_event
+Returns (slot.C, b_cache_hit, completion_event). slot.C is None when
+the headless mining kernel is enabled. The completion_event
 is recorded on stream_main immediately after noisy_gemm; pass it to
 CompletionTracker.record_launch(event=...) so the callback fires when
 the main kernel actually finishes, not when this function returns.
@@ -35,6 +37,7 @@ from miner_base.commitment_hash import CommitmentHasher
 from pearl_gateway.comm.dataclasses import MiningJob
 from pearl_gemm import (
     commitment_hash_from_merkle_roots,
+    headless_mine,
     make_pow_target_tensor,
     noise_gen,
     noisy_gemm,
@@ -209,7 +212,15 @@ def pearl_gemm_noisy_phase_c(
     a_generator: Optional[torch.Generator] = None,
     submit_block: bool = True,
     on_callback_done: Optional[Callable[[], None]] = None,
-) -> tuple[torch.Tensor, bool, torch.cuda.Event]:
+    mine_only: bool = False,
+    kernel_tile_size_m: int | None = None,
+    kernel_tile_size_n: int | None = None,
+    kernel_tile_size_k: int | None = None,
+    kernel_cluster_size_m: int = 1,
+    kernel_cluster_size_n: int = 1,
+    kernel_pipeline_stages: int | None = None,
+    kernel_mma_registers: int | None = None,
+) -> tuple[torch.Tensor | None, bool, torch.cuda.Event]:
     """Phase C multi-stream cached call.
 
     on_callback_done: if provided, MUST be called exactly once per call
@@ -272,6 +283,9 @@ def pearl_gemm_noisy_phase_c(
         mining_job: MiningJob = get_async_manager().get_mining_job()
         mining_config = matmul_config.mining_config
         adjusted_target = mining_job.adjust_target(mining_config=mining_config)
+        kernel_tile_size_m = kernel_tile_size_m or settings.tile_size_m
+        kernel_tile_size_n = kernel_tile_size_n or settings.tile_size_n
+        kernel_tile_size_k = kernel_tile_size_k or settings.tile_size_k
 
         hash_key = CommitmentHasher.get_key(
             mining_job.incomplete_header_bytes, mining_config
@@ -426,36 +440,73 @@ def pearl_gemm_noisy_phase_c(
             # before the kernel reads it.
             slot.host_signal_sync.zero_()
 
-            noisy_gemm(
-                A=slot.A,
-                B=B,
-                EAL=slot.EAL,
-                EAL_fp16=slot.EAL_fp16,
-                EBR=EBR,
-                EBR_fp16=EBR_fp16,
-                EAR_R_major=slot.EAR_R_major,
-                EBL_R_major=EBL_R_major,
-                EAR_K_major=slot.EAR_K_major,
-                EBL_K_major=EBL_K_major,
-                AxEBL_fp16=slot.A_E_BL,
-                EARxBpEB_fp16=slot.EARxBpEB,
-                ApEA=slot.ApEA,
-                BpEB=BpEB,
-                A_scales=slot.A_scales,
-                B_scales=B_scales,
-                C=slot.C,
-                host_signal_header_pinned=host_signal_header_pinned,
-                host_signal_sync=slot.host_signal_sync,
-                pow_target=pow_target_tensor,
-                pow_key=slot.commitment_hash_A.view(torch.uint32),
-                tile_size_m=settings.tile_size_m,
-                tile_size_n=settings.tile_size_n,
-                tile_size_k=settings.tile_size_k,
-                run_noising_A=True,
-                run_noising_B=run_noising_B,
-                skip_reduction=False,
-                skip_denoising=False,
-            )
+            if mine_only:
+                headless_mine(
+                    A=slot.A,
+                    B=B,
+                    EAL=slot.EAL,
+                    EAL_fp16=slot.EAL_fp16,
+                    EBR=EBR,
+                    EBR_fp16=EBR_fp16,
+                    EAR_R_major=slot.EAR_R_major,
+                    EBL_R_major=EBL_R_major,
+                    EAR_K_major=slot.EAR_K_major,
+                    EBL_K_major=EBL_K_major,
+                    AxEBL_fp16=slot.A_E_BL,
+                    EARxBpEB_fp16=slot.EARxBpEB,
+                    ApEA=slot.ApEA,
+                    BpEB=BpEB,
+                    host_signal_header_pinned=host_signal_header_pinned,
+                    host_signal_sync=slot.host_signal_sync,
+                    pow_target=pow_target_tensor,
+                    pow_key=slot.commitment_hash_A.view(torch.uint32),
+                    tile_size_m=kernel_tile_size_m,
+                    tile_size_n=kernel_tile_size_n,
+                    tile_size_k=kernel_tile_size_k,
+                    cluster_size_m=kernel_cluster_size_m,
+                    cluster_size_n=kernel_cluster_size_n,
+                    pipeline_stages=kernel_pipeline_stages,
+                    mma_registers=kernel_mma_registers,
+                    run_noising_A=True,
+                    run_noising_B=run_noising_B,
+                )
+            else:
+                if slot.C is None:
+                    raise RuntimeError("slot.C is required when mine_only=False")
+                noisy_gemm(
+                    A=slot.A,
+                    B=B,
+                    EAL=slot.EAL,
+                    EAL_fp16=slot.EAL_fp16,
+                    EBR=EBR,
+                    EBR_fp16=EBR_fp16,
+                    EAR_R_major=slot.EAR_R_major,
+                    EBL_R_major=EBL_R_major,
+                    EAR_K_major=slot.EAR_K_major,
+                    EBL_K_major=EBL_K_major,
+                    AxEBL_fp16=slot.A_E_BL,
+                    EARxBpEB_fp16=slot.EARxBpEB,
+                    ApEA=slot.ApEA,
+                    BpEB=BpEB,
+                    A_scales=slot.A_scales,
+                    B_scales=B_scales,
+                    C=slot.C,
+                    host_signal_header_pinned=host_signal_header_pinned,
+                    host_signal_sync=slot.host_signal_sync,
+                    pow_target=pow_target_tensor,
+                    pow_key=slot.commitment_hash_A.view(torch.uint32),
+                    tile_size_m=kernel_tile_size_m,
+                    tile_size_n=kernel_tile_size_n,
+                    tile_size_k=kernel_tile_size_k,
+                    cluster_size_m=kernel_cluster_size_m,
+                    cluster_size_n=kernel_cluster_size_n,
+                    pipeline_stages=kernel_pipeline_stages,
+                    mma_registers=kernel_mma_registers,
+                    run_noising_A=True,
+                    run_noising_B=run_noising_B,
+                    skip_reduction=False,
+                    skip_denoising=False,
+                )
 
         completion_event = torch.cuda.Event()
         completion_event.record(stream_main)
@@ -537,7 +588,8 @@ def pearl_gemm_noisy_cached(
     settings,
     b_cache: Optional[BSideCache] = None,
     submit_block: bool = True,
-) -> tuple[torch.Tensor, bool]:
+    mine_only: bool = False,
+) -> tuple[torch.Tensor | None, bool]:
     """Phase B single-stream cached call. Kept for profile_run.py."""
     assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
 
@@ -548,7 +600,7 @@ def pearl_gemm_noisy_cached(
     r = settings.noise_rank
     device = A.device
 
-    C = torch.empty((m, n), dtype=out_dtype, device=device)
+    C = None if mine_only else torch.empty((m, n), dtype=out_dtype, device=device)
     matrix_bytes = max(m * k, n * k)
     tensor_hash_scratchpad = torch.empty(
         get_required_scratchpad_bytes(matrix_bytes),
@@ -670,36 +722,63 @@ def pearl_gemm_noisy_cached(
     pow_target_tensor = make_pow_target_tensor(adjusted_target)
     run_noising_B = (cached is None)
 
-    noisy_gemm(
-        A=A,
-        B=B,
-        EAL=EAL,
-        EAL_fp16=EAL_fp16,
-        EBR=EBR,
-        EBR_fp16=EBR_fp16,
-        EAR_R_major=EAR_R_major,
-        EBL_R_major=EBL_R_major,
-        EAR_K_major=EAR_K_major,
-        EBL_K_major=EBL_K_major,
-        AxEBL_fp16=A_E_BL,
-        EARxBpEB_fp16=EARxBpEB,
-        ApEA=ApEA,
-        BpEB=BpEB,
-        A_scales=A_scales,
-        B_scales=B_scales,
-        C=C,
-        host_signal_header_pinned=host_signal_header_pinned,
-        host_signal_sync=host_signal_sync,
-        pow_target=pow_target_tensor,
-        pow_key=commitment_hash_A_tensor.view(torch.uint32),
-        tile_size_m=settings.tile_size_m,
-        tile_size_n=settings.tile_size_n,
-        tile_size_k=settings.tile_size_k,
-        run_noising_A=True,
-        run_noising_B=run_noising_B,
-        skip_reduction=False,
-        skip_denoising=False,
-    )
+    if mine_only:
+        headless_mine(
+            A=A,
+            B=B,
+            EAL=EAL,
+            EAL_fp16=EAL_fp16,
+            EBR=EBR,
+            EBR_fp16=EBR_fp16,
+            EAR_R_major=EAR_R_major,
+            EBL_R_major=EBL_R_major,
+            EAR_K_major=EAR_K_major,
+            EBL_K_major=EBL_K_major,
+            AxEBL_fp16=A_E_BL,
+            EARxBpEB_fp16=EARxBpEB,
+            ApEA=ApEA,
+            BpEB=BpEB,
+            host_signal_header_pinned=host_signal_header_pinned,
+            host_signal_sync=host_signal_sync,
+            pow_target=pow_target_tensor,
+            pow_key=commitment_hash_A_tensor.view(torch.uint32),
+            tile_size_m=settings.tile_size_m,
+            tile_size_n=settings.tile_size_n,
+            tile_size_k=settings.tile_size_k,
+            run_noising_A=True,
+            run_noising_B=run_noising_B,
+        )
+    else:
+        noisy_gemm(
+            A=A,
+            B=B,
+            EAL=EAL,
+            EAL_fp16=EAL_fp16,
+            EBR=EBR,
+            EBR_fp16=EBR_fp16,
+            EAR_R_major=EAR_R_major,
+            EBL_R_major=EBL_R_major,
+            EAR_K_major=EAR_K_major,
+            EBL_K_major=EBL_K_major,
+            AxEBL_fp16=A_E_BL,
+            EARxBpEB_fp16=EARxBpEB,
+            ApEA=ApEA,
+            BpEB=BpEB,
+            A_scales=A_scales,
+            B_scales=B_scales,
+            C=C,
+            host_signal_header_pinned=host_signal_header_pinned,
+            host_signal_sync=host_signal_sync,
+            pow_target=pow_target_tensor,
+            pow_key=commitment_hash_A_tensor.view(torch.uint32),
+            tile_size_m=settings.tile_size_m,
+            tile_size_n=settings.tile_size_n,
+            tile_size_k=settings.tile_size_k,
+            run_noising_A=True,
+            run_noising_B=run_noising_B,
+            skip_reduction=False,
+            skip_denoising=False,
+        )
 
     if b_cache is not None and cached is None:
         b_cache.put(

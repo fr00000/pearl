@@ -4,6 +4,8 @@ pearl_gemm package
 This package provides CUDA kernels for Pearl GEMM with noising/denoising and PoW extraction.
 """
 
+import torch  # noqa: F401 - preload Torch shared libraries before pearl_gemm_cuda
+
 # Re-export pearl_gemm_cuda utilities for cleaner API
 from pearl_gemm_cuda import (
     HostSignalStatus,
@@ -26,6 +28,7 @@ from .pearl_gemm_interface import (
     commitment_hash_from_merkle_roots,
     denoise_converter,
     gemm,
+    headless_mine,
     noise_A,
     noise_B,
     noise_gen,
@@ -46,6 +49,7 @@ __all__ = [
     "get_host_signal_header_size",
     "get_host_signal_sync_size",
     "get_required_scratchpad_bytes",
+    "headless_mine",
     "kEALScaleFactorDenoise",
     "kEBRScaleFactorDenoise",
     "make_pow_target_tensor",

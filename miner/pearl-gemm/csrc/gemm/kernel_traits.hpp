@@ -16,7 +16,9 @@ using namespace cute;
 template <typename ElementIn_, typename ElementOut_, typename ElementDenoise_,
           typename ElementScale_, typename TileShape_MNKR_, bool Is_Even_M_,
           bool Is_Even_N_, int cM_, int cN_, bool SkipReduction_,
-          bool SkipDenoising_, int kStages_, bool EnableDebug_>
+          bool SkipDenoising_, int kStages_, bool EnableDebug_,
+          int MmaRegisters_,
+          bool MineOnly_ = false>
 struct KernelTraits {
 
   using ElementIn = ElementIn_;
@@ -33,8 +35,10 @@ struct KernelTraits {
   static constexpr bool Is_Even_N = Is_Even_N_;
   static constexpr bool SkipReduction = SkipReduction_;
   static constexpr bool SkipDenoising = SkipDenoising_;
+  static constexpr bool MineOnly = MineOnly_;
   static constexpr int kStages = kStages_;
   static constexpr bool EnableDebug = EnableDebug_;
+  static constexpr int MmaRegistersRequested = MmaRegisters_;
   static constexpr int srcLane = 0;
 
   using ProblemShape = Shape<int, int, int, int>;
@@ -55,6 +59,12 @@ struct KernelTraits {
   static constexpr int kNumProducerThreads = cutlass::NumThreadsPerWarp;
   static constexpr int kNumThreads = kNumMmaThreads + 128;
   static constexpr int kNumWarps = kNumThreads / cutlass::NumThreadsPerWarp;
+  static constexpr int DefaultMmaRegisters =
+      kNumWarps == 8 ? 256 : kNumWarps == 12 ? 240 : kNumWarps == 16 ? 160
+                                                                      : 112;
+  static constexpr int MmaRegisters =
+      MmaRegistersRequested == 0 ? DefaultMmaRegisters : MmaRegistersRequested;
+  static_assert(MmaRegisters >= 24 && MmaRegisters <= 256);
 
   using TileShape_MNK = Shape<Int<bM>, Int<bN>, Int<bK>>;
   // used for denoising
@@ -264,9 +274,24 @@ struct KernelTraits {
     };
   };
 
+  struct SharedStorageMineOnly : cute::aligned_struct<128> {
+    struct {
+      cute::array_aligned<ElementIn, cute::cosize_v<SmemLayoutA>,
+                          cutlass::detail::alignment_for_swizzle(SmemLayoutA{})>
+          smem_A;
+      cute::array_aligned<ElementIn, cute::cosize_v<SmemLayoutB>,
+                          cutlass::detail::alignment_for_swizzle(SmemLayoutB{})>
+          smem_B;
+    };
+
+    typename MainloopPipeline::SharedStorage pipeline;
+  };
+
   using SharedStorage =
-      cute::conditional_t<SkipDenoising, SharedStorageNoDenoise,
-                          SharedStorageDenoise>;
+      cute::conditional_t<
+          MineOnly, SharedStorageMineOnly,
+          cute::conditional_t<SkipDenoising, SharedStorageNoDenoise,
+                              SharedStorageDenoise>>;
 };
 
 }  // namespace pearl

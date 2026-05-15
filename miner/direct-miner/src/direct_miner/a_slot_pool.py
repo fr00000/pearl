@@ -13,7 +13,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import torch
 
@@ -49,7 +49,7 @@ class ASlot:
     ApEA: torch.Tensor                    # (m, k) int8
     A_E_BL: torch.Tensor                  # (m, r) fp16
 
-    C: torch.Tensor                       # (m, n) bf16 output
+    C: Optional[torch.Tensor]             # (m, n) bf16 output; None for headless
     host_signal_sync: torch.Tensor        # (host_signal_sync_size,) int8
     tensor_hash_scratchpad: torch.Tensor  # uint8
 
@@ -78,6 +78,7 @@ class ASlotPool:
         scratchpad_bytes: int,
         device: torch.device | str = "cuda",
         out_dtype: torch.dtype = torch.bfloat16,
+        allocate_c: bool = True,
     ):
         if num_slots < 1:
             raise ValueError("num_slots must be >= 1")
@@ -98,7 +99,11 @@ class ASlotPool:
                 EARxBpEB=torch.empty((n, noise_rank), dtype=torch.float16, device=device),
                 ApEA=torch.empty((m, k), dtype=torch.int8, device=device),
                 A_E_BL=torch.empty((m, noise_rank), dtype=torch.float16, device=device),
-                C=torch.empty((m, n), dtype=out_dtype, device=device),
+                C=(
+                    torch.empty((m, n), dtype=out_dtype, device=device)
+                    if allocate_c
+                    else None
+                ),
                 host_signal_sync=torch.zeros(
                     (host_signal_sync_size,), dtype=torch.int8, device=device
                 ),
@@ -131,7 +136,7 @@ class ASlotPool:
             + n * noise_rank * 2                    # EARxBpEB fp16
             + m * k * 1                             # ApEA int8
             + m * noise_rank * 2                    # A_E_BL fp16
-            + m * n * 2                             # C bf16
+            + (m * n * 2 if allocate_c else 0)      # C bf16
             + host_signal_sync_size                 # sync int8
             + scratchpad_bytes                      # scratchpad uint8
         )

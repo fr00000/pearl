@@ -31,11 +31,6 @@ from .synthetic_data import FixedBPool
 
 logger = logging.getLogger(__name__)
 
-# Outer tile sizes from the compiled kernel (kernel_traits.hpp).
-KERNEL_TILE_SIZE_M = 128
-KERNEL_TILE_SIZE_N = 256
-
-
 class DirectMiner:
     """Direct synthetic miner.
 
@@ -81,8 +76,8 @@ class DirectMiner:
         self.a_pool: Optional[ASlotPool] = None
 
         self._outer_tiles_per_matmul = (
-            math.ceil(config.shapes.m / KERNEL_TILE_SIZE_M) *
-            math.ceil(config.shapes.n / KERNEL_TILE_SIZE_N)
+            math.ceil(config.shapes.m / config.kernel_tile_size_m) *
+            math.ceil(config.shapes.n / config.kernel_tile_size_n)
         )
 
         self._start_time: float = 0.0
@@ -156,12 +151,21 @@ class DirectMiner:
             noise_rank=settings.noise_rank,
             host_signal_sync_size=host_signal_sync_size,
             scratchpad_bytes=scratchpad_bytes,
+            allocate_c=not self.config.enable_headless_kernel,
         )
 
         logger.info(
             f"Direct miner initialized. "
             f"outer_tiles_per_matmul={self._outer_tiles_per_matmul} "
-            f"max_in_flight={self.config.max_in_flight}"
+            f"max_in_flight={self.config.max_in_flight} "
+            f"headless_kernel={self.config.enable_headless_kernel} "
+            f"kernel={self.config.kernel_tile_size_m}x"
+            f"{self.config.kernel_tile_size_n}x"
+            f"{self.config.kernel_tile_size_k} "
+            f"cluster={self.config.kernel_cluster_size_m}x"
+            f"{self.config.kernel_cluster_size_n} "
+            f"stages={self.config.kernel_pipeline_stages or 'default'} "
+            f"mma_registers={self.config.kernel_mma_registers or 'default'}"
         )
 
     def run(self) -> None:
@@ -327,6 +331,14 @@ class DirectMiner:
                 a_generator=generator,
                 submit_block=True,
                 on_callback_done=release_this_slot,
+                mine_only=self.config.enable_headless_kernel,
+                kernel_tile_size_m=self.config.kernel_tile_size_m,
+                kernel_tile_size_n=self.config.kernel_tile_size_n,
+                kernel_tile_size_k=self.config.kernel_tile_size_k,
+                kernel_cluster_size_m=self.config.kernel_cluster_size_m,
+                kernel_cluster_size_n=self.config.kernel_cluster_size_n,
+                kernel_pipeline_stages=self.config.kernel_pipeline_stages,
+                kernel_mma_registers=self.config.kernel_mma_registers,
             )
         except UnsafeSlotReleaseError:
             # Cleanup couldn't prove the GPU is idle, so the slot was

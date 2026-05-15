@@ -378,8 +378,18 @@ if not SKIP_CUDA_BUILD:
         "csrc/blake3/blake3.cu",
         "csrc/tensor_hash/tensor_hash.cu",
     ]
+
+    def matmul_instantiation_source(cfg, out_type):
+        regs_suffix = f"_regs{cfg.mma_registers}" if cfg.mma_registers != 0 else ""
+        return (
+            "csrc/gemm/instantiations/"
+            f"gemm_R{cfg.R}_{out_type}_{cfg.tile_size_m}x{cfg.tile_size_n}x"
+            f"{cfg.tile_size_k}_{cfg.pipeline_stages}stages_cluster"
+            f"{cfg.cM}x{cfg.cN}{regs_suffix}.cu"
+        )
+
     sources.extend(
-        f"csrc/gemm/instantiations/gemm_R{cfg.R}_{out_type}_{cfg.tile_size_m}x{cfg.tile_size_n}x{cfg.tile_size_k}_{cfg.pipeline_stages}stages_cluster{cfg.cM}x{cfg.cN}.cu"
+        matmul_instantiation_source(cfg, out_type)
         for cfg in MATMUL_KERNELS
         for out_type in OUTPUT_TYPES
     )

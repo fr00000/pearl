@@ -182,3 +182,29 @@ Note: matmul rate (mm/s) is 4× lower than at the prior winner shape because eac
 - 5-min runs have ±2-3% variance; cells within 3% of each other are statistically tied
 - The 4% bump is at the edge of where I'd want a longer (30-min) verification before adopting in production — recommend a brief replicated re-run at this shape before declaring it the new baseline
 - The kernel is compute-bound at ~2M tiles/sec/GPU on H200 — further bandwidth or memory expansion is unlikely to help. Future gains will come from kernel work, not shape tuning.
+
+---
+
+## Post-headless/kernel-sweep launcher note
+
+The production launcher now defaults to the latest measured Hopper direct-miner
+winner from `H100_SXM_VERIFY.md`:
+
+```bash
+--m 8192 --n 524032 --k 8192 \
+--max-in-flight 4 \
+--enable-b-cache \
+--enable-headless-kernel \
+--kernel-tile-m 64 \
+--kernel-tile-n 256 \
+--kernel-tile-k 128 \
+--kernel-stages 3 \
+--kernel-cluster-m 2 \
+--kernel-cluster-n 1
+```
+
+That configuration sustained **3,512,843 tiles/s** on H100 SXM. It has not yet
+been separately re-swept on H200 after the headless/tile-kernel changes, but it
+is the best measured direct-miner setting and is safe to override via
+`SHAPE_*`, `MAX_IN_FLIGHT`, and `KERNEL_*` environment variables if H200 needs a
+local confirmation sweep.
