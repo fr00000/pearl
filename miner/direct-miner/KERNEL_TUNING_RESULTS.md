@@ -95,6 +95,46 @@ Conclusion: lower `k` is a trap because the protocol target scales with
 trades about half the normalized attempt rate for double the target adjustment
 and nets a confirmed **+3.22% expected mining chance**.
 
+### Quick Fixed-k m/n/max-in-flight Check
+
+After selecting `k=16384`, we ran a quick fixed-k sweep to check whether `m`,
+`n`, or `max_in_flight` should move around the new winner.
+
+Pod artifacts:
+
+```text
+/workspace/sweeps/k16384-mn-mif-quick-20260515-210849/summary.csv
+/workspace/sweeps/k16384-combo-quick-20260515-211922/summary.csv
+```
+
+All cells used `k=16384`, the production `128x256x128 stages=3 cluster=2x1`
+headless kernel, and B-cache. Because `k` was fixed, normalized attempts/s and
+chance-weighted rate rank cells the same.
+
+First-pass 45-second results:
+
+| Cell | m | n | max_in_flight | Normalized attempts/s | Notes |
+|---|---:|---:|---:|---:|---|
+| `mif2` | 8192 | 261888 | 2 | 1,298,558 | first-pass top, not confirmed |
+| `n245760` | 8192 | 245760 | 4 | 1,297,163 | noise-level above current |
+| `n261888_current` | 8192 | 261888 | 4 | 1,296,366 | current production |
+| `n229376` | 8192 | 229376 | 4 | 1,293,775 | slightly lower |
+| `m4096` | 4096 | 261888 | 4 | 1,287,998 | lower |
+| `m16384` | 16384 | 261888 | 4 | 1,295,296 | not clean; errors/no final |
+| `m32768` | 32768 | 261888 | 4 | 1,290,582 | killed/no final |
+
+Combo/repeat 75-second check:
+
+| Cell | m | n | max_in_flight | Normalized attempts/s | Notes |
+|---|---:|---:|---:|---:|---|
+| `current_mif4` | 8192 | 261888 | 4 | 1,297,360 | repeat winner |
+| `current_mif2` | 8192 | 261888 | 2 | 1,295,129 | first-pass `mif=2` did not repeat |
+| `n245760_mif2` | 8192 | 245760 | 2 | 1,292,333 | combo lost |
+
+Conclusion: no production change. The quick sweep did not show a durable gain
+from smaller `n`, larger/smaller `m`, or changing `max_in_flight`. Keep
+`m=8192`, `n=261888`, `k=16384`, `max_in_flight=4`.
+
 ## 2026-05-15 H100 Sweep
 
 Pod artifact:
