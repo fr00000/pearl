@@ -241,6 +241,13 @@ def pearl_gemm_noisy_phase_c(
     # kernel actually launches.
     completion_event = None
 
+    # Captured once during preflight so the same manager instance
+    # services both the enable-async check and the later
+    # schedule_status_check call — refetching get_async_manager()
+    # at the schedule site would break the ownership chain if the
+    # accessor ever stopped being a singleton.
+    manager = None
+
     try:
         # PREFLIGHT: verify async event processing is enabled BEFORE
         # any GPU work or pinned-header acquisition. Inside the try
@@ -484,10 +491,13 @@ def pearl_gemm_noisy_phase_c(
             )
 
             # Async-enabled check already happened in preflight at
-            # function entry. schedule_status_check could still raise
-            # for other internal reasons; outer finally handles cleanup
-            # via the gpu_work_queued + scheduled_or_owned flags.
-            get_async_manager().schedule_status_check(completion_event, wrapped_cb)
+            # function entry — reuse the captured manager so this
+            # call is bound to the exact instance whose conf flag
+            # was verified. schedule_status_check could still raise
+            # for other internal reasons; outer finally handles
+            # cleanup via the gpu_work_queued + scheduled_or_owned
+            # flags.
+            manager.schedule_status_check(completion_event, wrapped_cb)
             host_signal_header_pinned = None  # owned by callback
             # Ownership of on_callback_done has been transferred to the
             # callback wrapper; outer finally must NOT release.
