@@ -75,4 +75,74 @@ The failing launch is the `MerkleTreeRootsKernel` inside `tensor_hash`. At n × 
 
 This is a kernel-side ceiling, not a hardware one. `stress_n1024` (n=1 048 576) would fail identically and was skipped. To exceed the stress_n256 throughput would require modifying `MerkleTreeRootsKernel::get_grid_shape` to chunk larger inputs across multiple launches or use a different block sizing — an opt/direct-mining change that's out of scope here.
 
-**Practical conclusion: stress_n256 is the maximum usable shape on the current kernel. Larger n is blocked by a launch-config constraint, not hardware.**
+**Practical conclusion at the time:** exact 4 GiB B-side tensor hashes fail on the current `tensor_hash` API. Larger `n` is blocked at the `uint32_t data_size`/launch-config boundary, not by H100 memory capacity.
+
+## Addendum: headless mining op and freed-memory sweep
+
+On 2026-05-15 we built `opt/headless-mine-op` (`cdc12c1e`), a dedicated `headless_mine` CUDA op for direct mining. This path avoids allocating or writing the large `C` output tensor while preserving the noising, transcript extraction, PoW signal, and gateway proof/submission path.
+
+### 5-minute production-shape benchmark
+
+Configuration:
+
+- Hardware: 1x NVIDIA H100 80GB HBM3
+- Shape: `m=8192, n=262144, k=8192`
+- Flags: `--max-in-flight 4 --enable-b-cache --enable-headless-kernel`
+- Diagnostics: off
+- Effective duration: 293.4 s
+
+| Path | m | n | k | outer tiles/mm | mm/s | tile rate (tiles/s) | cache h/m/inv | errors |
+|---|---:|---:|---:|---:|---:|---:|---|---:|
+| Original non-headless | 8192 | 262144 | 8192 | 65 536 | 32.1 | 2 101 356 | 9 402 / 5 / 4 | 0 |
+| Headless-lite | 8192 | 262144 | 8192 | 65 536 | 34.7 | 2 273 295 | n/a | 0 |
+| Dedicated `headless_mine` | 8192 | 262144 | 8192 | 65 536 | 34.9 | 2 284 171 | 10 224 / 3 / 2 | 0 |
+
+Result:
+
+- Dedicated `headless_mine` is **+8.7%** vs the original non-headless path.
+- It is only **+0.5%** vs headless-lite, so the throughput ceiling is essentially unchanged.
+- The real win is memory: observed steady VRAM during the 5-minute run was about **5.7 GiB**, with the quick-sweep poll seeing a transient peak around **7.8 GiB**. This is much lower than carrying `C` at this shape.
+
+### 60-second freed-memory sweep
+
+We then spent the freed memory on larger synthetic shapes. Each cell used:
+
+```bash
+uv run direct-miner \
+  --m <m> --n <n> --k 8192 \
+  --max-in-flight <mif> \
+  --enable-b-cache \
+  --enable-headless-kernel \
+  --log-interval 100
+```
+
+| Cell | m | n | k | max_in_flight | mm/s | tile rate (tiles/s) | peak VRAM MiB | status |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| base_n256 | 8192 | 262144 | 8192 | 4 | 34.9 | 2 286 220 | 7 837 | clean |
+| n320 | 8192 | 327680 | 8192 | 4 | 27.9 | 2 283 071 | 6 803 | clean |
+| n384 | 8192 | 393216 | 8192 | 4 | 23.2 | 2 285 138 | 7 915 | clean |
+| n448 | 8192 | 458752 | 8192 | 4 | 20.0 | 2 295 710 | 9 027 | clean |
+| n480 | 8192 | 491520 | 8192 | 4 | 18.7 | 2 297 868 | 9 583 | clean |
+| **n512minus** | **8192** | **524032** | **8192** | **4** | **17.6** | **2 300 118** | **10 137** | **clean** |
+| m16_n256 | 16384 | 262144 | 8192 | 4 | 17.4 | 2 282 073 | 6 219 | clean |
+| m32_n256 | 32768 | 262144 | 8192 | 4 | n/a | n/a | 9 429 | killed during short drain |
+| n512minus_mif8 | 8192 | 524032 | 8192 | 8 | live ~17.5 | live ~2.29M | 11 197 | killed during short drain |
+| m16_n512minus | 16384 | 524032 | 8192 | 4 | final not representative | live ~2.30M | 10 685 | slot drain timeout |
+
+Notes:
+
+- `n=524032` works because `n * k = 4 292 870 144` bytes, just below the 4 GiB `uint32_t` boundary. Exact `n=524288` still fails.
+- Wider `n` is the only useful way to spend the freed memory. Bigger `m` was flat or worse in quick tests.
+- The best clean 60-second cell was `8192 x 524032 x 8192`, but it was only **+0.6%** over `8192 x 262144 x 8192`.
+- The extra memory therefore buys a small throughput gain, not a new regime. The practical production choice is:
+
+```bash
+uv run direct-miner \
+  --m 8192 --n 524032 --k 8192 \
+  --max-in-flight 4 \
+  --enable-b-cache \
+  --enable-headless-kernel \
+  --log-interval 100
+```
+
+This is the best measured memory-heavy shape, but the margin is small enough that `8192 x 262144 x 8192` remains a reasonable conservative fallback if `n=524032` shows any long-run instability.
