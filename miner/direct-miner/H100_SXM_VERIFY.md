@@ -12,12 +12,12 @@ Does the H200 stress sweep winner (`stress_n256` = 8192 × 262144 × 8192) carry
 
 ## Current production winner
 
-As of the 2026-05-15 headless/kernel sweep, the recommended H100/Hopper
+As of the 2026-05-15 chance-weighted shape sweep, the recommended H100/Hopper
 direct-miner command is:
 
 ```bash
 uv run direct-miner \
-  --m 8192 --n 524032 --k 8192 \
+  --m 8192 --n 261888 --k 16384 \
   --max-in-flight 4 \
   --enable-b-cache \
   --enable-headless-kernel \
@@ -29,9 +29,12 @@ uv run direct-miner \
   --kernel-cluster-n 1
 ```
 
-Confirmed 5-minute rate: **2,506,384 raw outer-tiles/s per GPU**, which is
-also **2,506,384 normalized 128-tile-equivalent attempts/s** for this
-`tile_m=128` kernel. The startup scripts use this shape by default.
+Confirmed 5-minute rate: **1,292,734 normalized attempts/s per GPU**. Because
+the protocol difficulty target scales by `h * w * rounded_common_dim`, the
+coin-rate comparison across different `k` values is
+`normalized_attempt_rate * k`; this shape is **+3.22% expected mining chance**
+versus the prior `8192 x 524032 x 8192` production reference. The startup
+scripts use this shape by default.
 
 ## Results
 

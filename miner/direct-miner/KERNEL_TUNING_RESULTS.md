@@ -10,7 +10,7 @@ benchmark notes live in `H100_SXM_VERIFY.md`.
 Keep the production direct-miner kernel at:
 
 ```bash
---m 8192 --n 524032 --k 8192 \
+--m 8192 --n 261888 --k 16384 \
 --max-in-flight 4 \
 --enable-b-cache \
 --enable-headless-kernel \
@@ -26,7 +26,8 @@ Do not pass `--kernel-mma-registers` by default.
 
 ## Metric Rule
 
-Use `normalized_attempt_rate`, not raw outer-tile rate, for kernel decisions.
+Use `normalized_attempt_rate`, not raw outer-tile rate, when comparing kernel
+variants at the same `k`.
 
 Raw outer-tile rate counts CTA completions. It is not always equal to mining
 lottery tickets because each CTA has a different number of MMA consumer threads
@@ -39,6 +40,60 @@ normalized_attempt_rate = raw_outer_tile_rate * (mma_consumer_threads_per_cta / 
 For the current `tile_m=128` production kernel, raw outer-tile rate and
 normalized attempts are equal. For `tile_m=64`, normalized attempts are half the
 raw outer-tile rate.
+
+When comparing different `k` values, compare chance-weighted rate instead:
+
+```text
+chance_weighted_rate = normalized_attempt_rate * rounded_common_dim
+```
+
+For the current fixed row/column pattern, all swept `k` values are multiples of
+the rank, so `rounded_common_dim == k`. This matches the protocol difficulty
+adjustment factor `h * w * rounded_common_dim`; a lower `k` can produce more
+hashes/sec while still being worse for expected coins.
+
+## 2026-05-15 Chance-Weighted Shape Sweep
+
+Pod artifacts:
+
+```text
+/workspace/sweeps/chance-shape-20260515-203520/summary.csv
+/workspace/sweeps/chance-shape-highk-20260515-204528/summary.csv
+/workspace/sweeps/chance-shape-midk-20260515-204914/summary.csv
+/workspace/sweeps/chance-shape-k16384-confirm-*.log
+```
+
+All cells used the production kernel config:
+
+```text
+max_in_flight=4
+headless kernel enabled
+B-cache enabled
+kernel=128x256x128 stages=3 cluster=2x1
+```
+
+The prior production shape was `m=8192 n=524032 k=8192` with a 5-minute
+reference of `2,504,835` normalized attempts/s, or `20,519,608,320`
+chance-weighted units/s.
+
+| Shape | Normalized attempts/s | Chance-weighted rate | Delta vs prior | Decision |
+|---|---:|---:|---:|---|
+| `8192x261888x16384` 5-min confirm | 1,292,734 | 21,180,153,856 | +3.22% | production |
+| `8192x261888x16384` quick repeat | 1,294,542 | 21,209,776,128 | +3.36% | confirms |
+| `8192x349440x12288` quick | 1,716,443 | 21,091,651,584 | +2.79% | backup |
+| `8192x209664x20480` quick | 1,022,681 | 20,944,506,880 | +2.07% | reject |
+| `8192x130816x32768` quick | 638,090 | 20,908,933,120 | +1.90% | reject |
+| `8192x524032x8192` quick | 2,505,167 | 20,522,328,064 | baseline | prior |
+| `8192x1048320x4096` quick | 4,574,304 | 18,736,349,184 | -8.69% | reject |
+| `8192x2096896x2048` quick | 8,397,809 | 17,198,712,832 | -16.18% | reject |
+
+Very high `k` cells near `49152` and `63488` crashed before producing progress
+and are not production candidates.
+
+Conclusion: lower `k` is a trap because the protocol target scales with
+`rounded_common_dim`. The best measured shape is `8192x261888x16384`, which
+trades about half the normalized attempt rate for double the target adjustment
+and nets a confirmed **+3.22% expected mining chance**.
 
 ## 2026-05-15 H100 Sweep
 

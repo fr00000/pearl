@@ -53,3 +53,24 @@ def normalized_attempts_per_matmul(
     return outer_tiles_per_matmul(
         m=m, n=n, tile_m=tile_m, tile_n=tile_n
     ) * normalized_attempt_scale(tile_m=tile_m)
+
+
+def rounded_common_dim(*, k: int, rank: int) -> int:
+    """Return the common dimension used by the protocol difficulty scaling."""
+    if k <= 0 or rank <= 0:
+        raise ValueError("k and rank must be positive")
+    return k - (k % rank)
+
+
+def chance_weighted_attempts_per_matmul(
+    *, m: int, n: int, k: int, rank: int, tile_m: int, tile_n: int
+) -> float:
+    """Return a shape-comparable expected mining-chance score per matmul.
+
+    The protocol multiplies the base target by h * w * rounded_common_dim.
+    For a fixed row/column pattern, h*w is constant, so comparing different
+    ``k`` values requires multiplying normalized attempts by rounded_common_dim.
+    """
+    return normalized_attempts_per_matmul(
+        m=m, n=n, tile_m=tile_m, tile_n=tile_n
+    ) * rounded_common_dim(k=k, rank=rank)

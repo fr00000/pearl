@@ -22,10 +22,12 @@ from vllm_miner.mining_state import (
 
 from .a_slot_pool import ASlotPool, SlotAcquireTimeout
 from .attempt_metrics import (
+    chance_weighted_attempts_per_matmul,
     mma_consumer_threads_per_cta,
     normalized_attempts_per_matmul,
     normalized_attempt_scale,
     outer_tiles_per_matmul,
+    rounded_common_dim,
 )
 from .b_cache import BSideCache
 from .completion_tracker import CompletionTracker
@@ -106,6 +108,8 @@ class DirectMiner:
                 tile_n=config.kernel_tile_size_n,
             )
         )
+        self._rounded_common_dim = 0
+        self._chance_weighted_attempts_per_matmul = 0.0
 
         self._start_time: float = 0.0
         self._last_log_time: float = 0.0
@@ -153,6 +157,20 @@ class DirectMiner:
         torch.cuda.synchronize()
 
         settings = get_async_manager()._conf
+        self._rounded_common_dim = rounded_common_dim(
+            k=self.config.shapes.k,
+            rank=settings.noise_rank,
+        )
+        self._chance_weighted_attempts_per_matmul = (
+            chance_weighted_attempts_per_matmul(
+                m=self.config.shapes.m,
+                n=self.config.shapes.n,
+                k=self.config.shapes.k,
+                rank=settings.noise_rank,
+                tile_m=self.config.kernel_tile_size_m,
+                tile_n=self.config.kernel_tile_size_n,
+            )
+        )
         self._matmul_config = GPUMatmulConfigFactory.create(
             k=self.config.shapes.k, noise_rank=settings.noise_rank
         )
@@ -196,6 +214,9 @@ class DirectMiner:
             f"attempt_scale={self._attempt_scale:.3f} "
             f"normalized_attempts_per_matmul="
             f"{self._normalized_attempts_per_matmul:.1f} "
+            f"rounded_common_dim={self._rounded_common_dim} "
+            f"chance_weighted_attempts_per_matmul="
+            f"{self._chance_weighted_attempts_per_matmul:.1f} "
             f"max_in_flight={self.config.max_in_flight} "
             f"headless_kernel={self.config.enable_headless_kernel} "
             f"kernel_hash_stats={self.config.enable_kernel_hash_stats} "
@@ -493,6 +514,13 @@ class DirectMiner:
         cumulative_attempt_rate = (
             cumulative_completion_rate * self._normalized_attempts_per_matmul
         )
+        instant_chance_weighted_rate = (
+            instant_completion_rate * self._chance_weighted_attempts_per_matmul
+        )
+        cumulative_chance_weighted_rate = (
+            cumulative_completion_rate
+            * self._chance_weighted_attempts_per_matmul
+        )
 
         logger.info(
             f"[DIRECT MINER] completed={completed} "
@@ -502,6 +530,8 @@ class DirectMiner:
             f"{instant_outer_tile_rate:.0f}/s now raw) "
             f"attempts=({cumulative_attempt_rate:.0f}/s avg, "
             f"{instant_attempt_rate:.0f}/s now 128eq) "
+            f"chance_weighted=({cumulative_chance_weighted_rate:.0f}/s avg, "
+            f"{instant_chance_weighted_rate:.0f}/s now) "
             f"launched={self._launch_count} "
             f"(launch_rate={instant_launch_rate:.1f}/s) "
             f"in_flight={in_flight}"
@@ -540,12 +570,16 @@ class DirectMiner:
         rate = completed / elapsed if elapsed > 0 else 0
         raw_outer_tile_rate = rate * self._outer_tiles_per_matmul
         normalized_attempt_rate = rate * self._normalized_attempts_per_matmul
+        chance_weighted_rate = (
+            rate * self._chance_weighted_attempts_per_matmul
+        )
         logger.info(
             f"[DIRECT MINER] FINAL: completed={completed} "
             f"launched={self._launch_count} elapsed={elapsed:.1f}s "
             f"completion_rate={rate:.1f}/s "
             f"raw_outer_tile_rate={raw_outer_tile_rate:.0f}/s "
-            f"normalized_attempt_rate={normalized_attempt_rate:.0f}/s"
+            f"normalized_attempt_rate={normalized_attempt_rate:.0f}/s "
+            f"chance_weighted_rate={chance_weighted_rate:.0f}/s"
         )
         if self.b_cache is not None:
             if self.diagnostics is not None:
