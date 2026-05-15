@@ -183,6 +183,56 @@ flags. Best next candidates:
 - Design a proof-compatible non-256 `tile_n` path only if the proof row/column
   extraction logic is updated and validated first.
 
+### 2026-05-15 Mine-Kernel Profile and MSW Prefilter Rejection
+
+Pod artifacts:
+
+```text
+/workspace/sweeps/ncu-k16384-mine-20260515-213359/ncu.log
+/workspace/sweeps/nsys-k16384-direct-20260515-213921/
+/workspace/sweeps/msw-prefilter-bench-20260515-215246/direct_miner.log
+```
+
+Nsight Compute could attach but could not read GPU performance counters in the
+pod:
+
+```text
+ERR_NVGPUCTRPERM - The user does not have permission to access NVIDIA GPU
+Performance Counters on target device 0
+```
+
+Nsight Systems worked when launched directly with `--duration` and
+`--trace-fork-before-exec=true`. For the current production shape
+`8192x261888x16384`, the GPU kernel-time breakdown was:
+
+| Kernel group | GPU kernel time | Instances | Avg duration | Share |
+|---|---:|---:|---:|---:|
+| `pearl::hopper_mine_ws` | 62.795 s | 1260 | 49.84 ms | 98.1% |
+| PyTorch int8 A generation | 0.630 s | 1265 | 0.498 ms | 1.0% |
+| A noising | 0.287 s | 1261 | 0.228 ms | 0.4% |
+| Merkle roots | 0.253 s | 1264 | 0.200 ms | 0.4% |
+
+This confirms that new gains need to come from `hopper_mine_ws`; surrounding
+launch, A-generation, noising, and Merkle work are already too small to matter
+much at this shape.
+
+Experiment: add a non-diagnostics fast path that computes only the
+most-significant BLAKE3 output word, rejects immediately when it is above the
+target MSW, and only falls back to the full uint256 digest comparison when the
+MSW is equal.
+
+Result on the H100 pod with the current production settings:
+
+| Variant | Normalized attempts/s | Chance-weighted rate | Delta vs 1,292,734/s reference | Decision |
+|---|---:|---:|---:|---|
+| current production reference | 1,292,734 | 21,180,153,856 | baseline | keep |
+| MSW prefilter | 1,268,177 | 20,777,816,115 | -1.90% | reject |
+
+Conclusion: the MSW-only helper is semantically valid but slower. It likely
+increases code size/register pressure enough to offset the skipped digest-word
+stores and comparison loop. The experiment was reverted and the pod was rebuilt
+back to the known-good production kernel.
+
 ### Rejected: Final WGMMA Wait Elision
 
 Experiment: have `TileHashAccumulator::accumulate()` report whether it already
