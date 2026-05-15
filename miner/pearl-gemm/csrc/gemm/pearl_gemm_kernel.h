@@ -193,11 +193,7 @@ __global__ void __launch_bounds__(
       }
     }
   } else {  // Consumer
-    // cutlass::arch::warpgroup_reg_alloc<KTraits::kNumWarps == 12 ? 240 : 160>();
-    cutlass::arch::warpgroup_reg_alloc<KTraits::kNumWarps == 8    ? 256
-                                       : KTraits::kNumWarps == 12 ? 240
-                                       : KTraits::kNumWarps == 16 ? 160
-                                                                  : 112>();
+    cutlass::arch::warpgroup_reg_alloc<KTraits::MmaRegisters>();
 
     TileScheduler scheduler{};
 
@@ -381,10 +377,7 @@ __global__ void __launch_bounds__(
       }
     }
   } else {
-    cutlass::arch::warpgroup_reg_alloc<KTraits::kNumWarps == 8    ? 256
-                                       : KTraits::kNumWarps == 12 ? 240
-                                       : KTraits::kNumWarps == 16 ? 160
-                                                                  : 112>();
+    cutlass::arch::warpgroup_reg_alloc<KTraits::MmaRegisters>();
 
     TileScheduler scheduler{};
     typename KTraits::TiledMma tiled_mma;

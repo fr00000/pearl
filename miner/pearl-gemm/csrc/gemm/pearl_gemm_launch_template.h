@@ -14,14 +14,15 @@
 #include "static_switch.h"
 
 template <class ElementDenoise_AxEBL, int R, int bM_noising, int bK_noising,
-          int kStages>
+          int kStages, bool ComputeAxEBL = true>
 void run_pearl_noising_A_(PearlAPIParams& params, cudaStream_t stream = 0) {
   using namespace cute;
   using TileShape_MRK = Shape<Int<bM_noising>, Int<R>, Int<bK_noising>>;
 
   BOOL_SWITCH(params.k % get<2>(TileShape_MRK{}) == 0, IsEvenKNoising,
               run_pearl_noising_A<ElementDenoise_AxEBL, TileShape_MRK, kStages,
-                                  IsEvenKNoising>(params, stream););
+                                  IsEvenKNoising, ComputeAxEBL>(params,
+                                                                stream););
 }
 
 template <class ElementDenoise_EARxBpEB, int R, int bN_noising, int bK_noising,
@@ -36,9 +37,9 @@ void run_pearl_noising_B_(PearlAPIParams& params, cudaStream_t stream = 0) {
 }
 
 template <class ElementOut, int R, int bM, int bN, int bK, int kStages,
-          int cM = 1, int cN = 1, bool SkipReduction = true,
-          bool SkipDenoising = false, bool EnableDebug = false,
-          bool MineOnly = false>
+          int cM = 1, int cN = 1, int MmaRegisters = 0,
+          bool SkipReduction = true, bool SkipDenoising = false,
+          bool EnableDebug = false, bool MineOnly = false>
 void run_pearl_gemm_(PearlAPIParams& params, cudaStream_t stream = 0) {
   using namespace cute;
   using TileShape_MNKR = Shape<Int<bM>, Int<bN>, Int<bK>, Int<R>>;
@@ -51,14 +52,15 @@ void run_pearl_gemm_(PearlAPIParams& params, cudaStream_t stream = 0) {
           is_even_n, IsEvenN,
 
           run_pearl_gemm<ElementOut, TileShape_MNKR, kStages, cM, cN, IsEvenM,
-                         IsEvenN, SkipReduction, SkipDenoising, EnableDebug,
-                         MineOnly>(params, stream);
+                         IsEvenN, MmaRegisters, SkipReduction,
+                         SkipDenoising, EnableDebug, MineOnly>(params, stream);
 
       ););
 }
 
 template <class ElementOut, int R, int bM, int bN, int bK, int kStages,
-          int cM = 1, int cN = 1, bool EnableDebug = false>
+          int cM = 1, int cN = 1, int MmaRegisters = 0,
+          bool EnableDebug = false>
 void run_pearl_mine_(PearlAPIParams& params, cudaStream_t stream = 0) {
   using namespace cute;
   using TileShape_MNKR = Shape<Int<bM>, Int<bN>, Int<bK>, Int<R>>;
@@ -71,7 +73,7 @@ void run_pearl_mine_(PearlAPIParams& params, cudaStream_t stream = 0) {
           is_even_n, IsEvenN,
 
           run_pearl_mine<ElementOut, TileShape_MNKR, kStages, cM, cN, IsEvenM,
-                         IsEvenN, EnableDebug>(params, stream);
+                         IsEvenN, MmaRegisters, EnableDebug>(params, stream);
 
       ););
 }

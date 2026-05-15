@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 direct-miner = "direct_miner.__main__:main"
+direct-miner-inspect-pattern = "direct_miner.pattern_inspector:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/direct_miner"]

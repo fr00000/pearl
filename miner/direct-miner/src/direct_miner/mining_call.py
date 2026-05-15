@@ -213,6 +213,13 @@ def pearl_gemm_noisy_phase_c(
     submit_block: bool = True,
     on_callback_done: Optional[Callable[[], None]] = None,
     mine_only: bool = False,
+    kernel_tile_size_m: int | None = None,
+    kernel_tile_size_n: int | None = None,
+    kernel_tile_size_k: int | None = None,
+    kernel_cluster_size_m: int = 1,
+    kernel_cluster_size_n: int = 1,
+    kernel_pipeline_stages: int | None = None,
+    kernel_mma_registers: int | None = None,
 ) -> tuple[torch.Tensor | None, bool, torch.cuda.Event]:
     """Phase C multi-stream cached call.
 
@@ -276,6 +283,9 @@ def pearl_gemm_noisy_phase_c(
         mining_job: MiningJob = get_async_manager().get_mining_job()
         mining_config = matmul_config.mining_config
         adjusted_target = mining_job.adjust_target(mining_config=mining_config)
+        kernel_tile_size_m = kernel_tile_size_m or settings.tile_size_m
+        kernel_tile_size_n = kernel_tile_size_n or settings.tile_size_n
+        kernel_tile_size_k = kernel_tile_size_k or settings.tile_size_k
 
         hash_key = CommitmentHasher.get_key(
             mining_job.incomplete_header_bytes, mining_config
@@ -450,9 +460,13 @@ def pearl_gemm_noisy_phase_c(
                     host_signal_sync=slot.host_signal_sync,
                     pow_target=pow_target_tensor,
                     pow_key=slot.commitment_hash_A.view(torch.uint32),
-                    tile_size_m=settings.tile_size_m,
-                    tile_size_n=settings.tile_size_n,
-                    tile_size_k=settings.tile_size_k,
+                    tile_size_m=kernel_tile_size_m,
+                    tile_size_n=kernel_tile_size_n,
+                    tile_size_k=kernel_tile_size_k,
+                    cluster_size_m=kernel_cluster_size_m,
+                    cluster_size_n=kernel_cluster_size_n,
+                    pipeline_stages=kernel_pipeline_stages,
+                    mma_registers=kernel_mma_registers,
                     run_noising_A=True,
                     run_noising_B=run_noising_B,
                 )
@@ -481,9 +495,13 @@ def pearl_gemm_noisy_phase_c(
                     host_signal_sync=slot.host_signal_sync,
                     pow_target=pow_target_tensor,
                     pow_key=slot.commitment_hash_A.view(torch.uint32),
-                    tile_size_m=settings.tile_size_m,
-                    tile_size_n=settings.tile_size_n,
-                    tile_size_k=settings.tile_size_k,
+                    tile_size_m=kernel_tile_size_m,
+                    tile_size_n=kernel_tile_size_n,
+                    tile_size_k=kernel_tile_size_k,
+                    cluster_size_m=kernel_cluster_size_m,
+                    cluster_size_n=kernel_cluster_size_n,
+                    pipeline_stages=kernel_pipeline_stages,
+                    mma_registers=kernel_mma_registers,
                     run_noising_A=True,
                     run_noising_B=run_noising_B,
                     skip_reduction=False,

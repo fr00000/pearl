@@ -601,10 +601,10 @@ void gemm(at::Tensor& A,         // m x k
   bool kernel_found = false;
   for (int const R : {64, 128}) {
     MATMUL_CONFIG_SWITCH(
-        bM, bN, bK, R, pipeline_stages, cM, cN, kernel_found = true;
+        bM, bN, bK, R, pipeline_stages, cM, cN, 0, kernel_found = true;
         run_pearl_gemm_<ElementOut, R_, bM_, bN_, bK_, stages_, cM_, cN_,
-                        SkipReduction, SkipDenoising, EnableDebug>(params,
-                                                                   stream);
+                        mma_registers_, SkipReduction, SkipDenoising,
+                        EnableDebug>(params, stream);
         goto done;);
   }
 
@@ -642,6 +642,7 @@ void noisy_gemm(
     const std::optional<at::Tensor>& EARxBpEB_int32_, int64_t bM, int64_t bN,
     int64_t bK, int64_t cM, int64_t cN,
     std::optional<int64_t> pipeline_stages_ = std::nullopt,
+    std::optional<int64_t> mma_registers_ = std::nullopt,
     std::optional<int64_t> swizzle = std::nullopt, bool swizzle_n_maj = true,
     std::optional<int64_t> tile_size_m_noising_A_ = std::nullopt,
     std::optional<int64_t> tile_size_n_noising_B_ = std::nullopt,
@@ -796,6 +797,11 @@ void noisy_gemm(
 
   int const pipeline_stages = pipeline_stages_.value_or(
       get_pipeline_stages(bM, bN, bK, r, effective_skip_denoising, dprops));
+  int const mma_registers = mma_registers_.value_or(0);
+  TORCH_CHECK(
+      mma_registers == 0 || (mma_registers >= 24 && mma_registers <= 256),
+      "mma_registers must be None/0 or within [24, 256]. Got ",
+      mma_registers);
 
   PearlAPIParams params;
   using ElementOut = cutlass::bfloat16_t;
@@ -881,8 +887,13 @@ void noisy_gemm(
             tile_size_m_noising_A, tile_size_k_noising_A, r,
             pipeline_stages_noising_A, AxEBL_noising_dtype,
             kernel_found_noising_a = true;
-            run_pearl_noising_A_<ElementDenoise_AxEBL, R_, bM_, bK_, stages_>(
-                params, stream););
+            if (mine_only) {
+              run_pearl_noising_A_<ElementDenoise_AxEBL, R_, bM_, bK_, stages_,
+                                   false>(params, stream);
+            } else {
+              run_pearl_noising_A_<ElementDenoise_AxEBL, R_, bM_, bK_, stages_,
+                                   true>(params, stream);
+            });
       } else {
         kernel_found_noising_a = true;
       }
@@ -915,27 +926,29 @@ void noisy_gemm(
         TORCH_CHECK(!skip_reduction,
                     "mine_only headless kernel requires skip_reduction=False");
         MATMUL_CONFIG_SWITCH(
-            bM, bN, bK, r, pipeline_stages, cM, cN,
+            bM, bN, bK, r, pipeline_stages, cM, cN, mma_registers,
             kernel_found_matmul = true;
             run_pearl_mine_<ElementOut, R_, bM_, bN_, bK_, stages_, cM_, cN_,
-                            EnableDebug>(params, stream););
+                            mma_registers_, EnableDebug>(params, stream););
       } else {
         SKIP_REDUCTION_SWITCH(
             skip_reduction, SkipReduction,
             SKIP_DENOISING_SWITCH(
                 effective_skip_denoising, SkipDenoising,
                 MATMUL_CONFIG_SWITCH(
-                    bM, bN, bK, r, pipeline_stages, cM, cN,
+                    bM, bN, bK, r, pipeline_stages, cM, cN, mma_registers,
                     kernel_found_matmul = true;
                     run_pearl_gemm_<ElementOut, R_, bM_, bN_, bK_, stages_,
-                                    cM_, cN_, SkipReduction, SkipDenoising,
-                                    EnableDebug, false>(params, stream););););
+                                    cM_, cN_, mma_registers_, SkipReduction,
+                                    SkipDenoising, EnableDebug, false>(
+                        params, stream););););
       });
 
   TORCH_CHECK(kernel_found_matmul,
               "No noisy_gemm kernel found with given config: ", "bM = ", bM,
               ", bN = ", bN, ", bK = ", bK, ", R = ", r,
               ", stages = ", pipeline_stages, ", cM = ", cM, ", cN = ", cN,
+              ", mma_registers = ", mma_registers,
               ", SkipReduction = ", skip_reduction ? "true" : "false",
               ", SkipDenoising = ",
               effective_skip_denoising ? "true" : "false",
@@ -978,6 +991,7 @@ void headless_mine(
     const std::optional<at::Tensor>& EARxBpEB_int32_, int64_t bM, int64_t bN,
     int64_t bK, int64_t cM, int64_t cN,
     std::optional<int64_t> pipeline_stages_ = std::nullopt,
+    std::optional<int64_t> mma_registers_ = std::nullopt,
     std::optional<int64_t> swizzle = std::nullopt, bool swizzle_n_maj = true,
     std::optional<int64_t> tile_size_m_noising_A_ = std::nullopt,
     std::optional<int64_t> tile_size_n_noising_B_ = std::nullopt,
@@ -1001,8 +1015,9 @@ void headless_mine(
              BpEB, A_scales_dummy, B_scales_dummy, C_dummy,
              host_signal_header_pinned, host_signal_sync, pow_target, pow_key,
              AxEBL_int32_, EARxBpEB_int32_, bM, bN, bK, cM, cN,
-             pipeline_stages_, swizzle, swizzle_n_maj, tile_size_m_noising_A_,
-             tile_size_n_noising_B_, tile_size_k_noising_A_,
+             pipeline_stages_, mma_registers_, swizzle, swizzle_n_maj,
+             tile_size_m_noising_A_, tile_size_n_noising_B_,
+             tile_size_k_noising_A_,
              tile_size_k_noising_B_, pipeline_stages_noising_A,
              pipeline_stages_noising_B, k_blocks_per_split_noising_A_,
              k_blocks_per_split_noising_B_, run_noising_a, run_noising_b,
@@ -1255,6 +1270,7 @@ TORCH_LIBRARY(pearl_gemm, m) {
       "    int cluster_size_m = 1, "
       "    int cluster_size_n = 1, "
       "    int? pipeline_stages = None, "
+      "    int? mma_registers = None, "
       "    int? swizzle = None, "
       "    bool swizzle_n_maj = True, "
       "    int? tile_size_m_noising_A = None, "
@@ -1303,6 +1319,7 @@ TORCH_LIBRARY(pearl_gemm, m) {
       "    int cluster_size_m = 1, "
       "    int cluster_size_n = 1, "
       "    int? pipeline_stages = None, "
+      "    int? mma_registers = None, "
       "    int? swizzle = None, "
       "    bool swizzle_n_maj = True, "
       "    int? tile_size_m_noising_A = None, "

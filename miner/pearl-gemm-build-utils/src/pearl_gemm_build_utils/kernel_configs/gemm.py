@@ -31,3 +31,13 @@ class MatmulKernelConfig(BaseModel):
     # Cluster configuration
     cM: int = Field(default=1, ge=1, le=2, description="Cluster size in M dimension")
     cN: int = Field(default=1, ge=1, le=2, description="Cluster size in N dimension")
+
+    # Warpgroup register allocation. 0 preserves the kernel's current default
+    # heuristic; non-zero values instantiate explicit warpgroup_reg_alloc<N>
+    # variants for tuning.
+    mma_registers: int = Field(
+        default=0,
+        ge=0,
+        le=256,
+        description="MMA warpgroup register allocation; 0 uses kernel default",
+    )

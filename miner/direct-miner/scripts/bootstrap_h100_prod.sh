@@ -34,11 +34,17 @@ PIDFILE_DIR="/tmp/direct-miner-pids"
 PEARLD_DATA="$HOME/.pearld/data"
 STATE_FILE="$HOME/.pearl_bootstrap_state"
 
-# Verified production shape — see H100_SXM_VERIFY.md (commit 6023653a)
+# Verified production shape/kernel — see H100_SXM_VERIFY.md.
 SHAPE_M=8192
-SHAPE_N=262144
+SHAPE_N=524032
 SHAPE_K=8192
 MAX_IN_FLIGHT=4
+KERNEL_TILE_M=64
+KERNEL_TILE_N=256
+KERNEL_TILE_K=128
+KERNEL_STAGES=3
+KERNEL_CLUSTER_M=2
+KERNEL_CLUSTER_N=1
 
 # Pearl daemon RPC config (pearld is on 44107; oyster — not used here —
 # would be on 44207)
@@ -412,6 +418,13 @@ for gpu_idx in $GPUS; do
         --m "$SHAPE_M" --n "$SHAPE_N" --k "$SHAPE_K" \
         --max-in-flight "$MAX_IN_FLIGHT" \
         --enable-b-cache \
+        --enable-headless-kernel \
+        --kernel-tile-m "$KERNEL_TILE_M" \
+        --kernel-tile-n "$KERNEL_TILE_N" \
+        --kernel-tile-k "$KERNEL_TILE_K" \
+        --kernel-stages "$KERNEL_STAGES" \
+        --kernel-cluster-m "$KERNEL_CLUSTER_M" \
+        --kernel-cluster-n "$KERNEL_CLUSTER_N" \
         --log-interval 200 \
         --phase-tag "prod_gpu${gpu_idx}" \
         --metrics-output "$metrics_file" \
@@ -436,8 +449,9 @@ done
 [[ "$LAUNCHED" -ge 1 ]] || die "No miners successfully launched"
 
 # ===== Done =====
-EXPECTED_TILES=$((LAUNCHED * 2100000))
-EXPECTED_MM=$((LAUNCHED * 32))
+EXPECTED_TILES_PER_GPU=3510000
+EXPECTED_TILES=$((LAUNCHED * EXPECTED_TILES_PER_GPU))
+EXPECTED_MM=$(awk -v g="$LAUNCHED" 'BEGIN { printf "%.1f", g * 13.4 }')
 
 cat <<EOF
 
@@ -449,7 +463,8 @@ cat <<EOF
   Miners launched:   $LAUNCHED
   Miners failed:     $FAILED
   Production shape:  ${SHAPE_M} × ${SHAPE_N} × ${SHAPE_K}, mif=$MAX_IN_FLIGHT
-  Expected per-GPU:  ~2.1 M tiles/s (~32 mm/s)
+  Kernel:            ${KERNEL_TILE_M}×${KERNEL_TILE_N}×${KERNEL_TILE_K}, stages=$KERNEL_STAGES, cluster=${KERNEL_CLUSTER_M}×${KERNEL_CLUSTER_N}, headless
+  Expected per-GPU:  ~3.51 M tiles/s (~13.4 mm/s)
   Expected total:    ~${EXPECTED_TILES} tiles/s (~${EXPECTED_MM} mm/s aggregate)
 
 Useful commands:

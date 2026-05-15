@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
-# Production launch on 4× H200 with sweep-identified winner config.
-# Edit SHAPE_M/N/K and MAX_IN_FLIGHT below from sweep results.
+# Production launch on Hopper GPUs with the latest direct-miner winner config.
+# Override SHAPE_*/MAX_IN_FLIGHT/KERNEL_* via env vars for a local sweep.
 
 set -uo pipefail
 
 REPO_DIR="${REPO_DIR:-/root/pearl}"
 source "${REPO_DIR}/env.sh"
 
-# === EDIT THESE FROM H200 SWEEP RESULTS ===
+# === Latest measured direct-mining defaults; see H100_SXM_VERIFY.md ===
 SHAPE_M="${SHAPE_M:-8192}"
-SHAPE_N="${SHAPE_N:-65536}"
+SHAPE_N="${SHAPE_N:-524032}"
 SHAPE_K="${SHAPE_K:-8192}"
-MAX_IN_FLIGHT="${MAX_IN_FLIGHT:-8}"
+MAX_IN_FLIGHT="${MAX_IN_FLIGHT:-4}"
+KERNEL_TILE_M="${KERNEL_TILE_M:-64}"
+KERNEL_TILE_N="${KERNEL_TILE_N:-256}"
+KERNEL_TILE_K="${KERNEL_TILE_K:-128}"
+KERNEL_STAGES="${KERNEL_STAGES:-3}"
+KERNEL_CLUSTER_M="${KERNEL_CLUSTER_M:-2}"
+KERNEL_CLUSTER_N="${KERNEL_CLUSTER_N:-1}"
 # ===========================================
 
 LOG_DIR="/workspace/production-logs"
@@ -33,6 +39,7 @@ fi
 GPUS=$(nvidia-smi --query-gpu=index --format=csv,noheader | tr '\n' ' ')
 echo "Detected GPUs: $GPUS"
 echo "Config: m=$SHAPE_M n=$SHAPE_N k=$SHAPE_K mif=$MAX_IN_FLIGHT"
+echo "Kernel: ${KERNEL_TILE_M}x${KERNEL_TILE_N}x${KERNEL_TILE_K} stages=${KERNEL_STAGES} cluster=${KERNEL_CLUSTER_M}x${KERNEL_CLUSTER_N} headless"
 echo ""
 
 for gpu_idx in $GPUS; do
@@ -46,6 +53,13 @@ for gpu_idx in $GPUS; do
         --m "$SHAPE_M" --n "$SHAPE_N" --k "$SHAPE_K" \
         --max-in-flight "$MAX_IN_FLIGHT" \
         --enable-b-cache \
+        --enable-headless-kernel \
+        --kernel-tile-m "$KERNEL_TILE_M" \
+        --kernel-tile-n "$KERNEL_TILE_N" \
+        --kernel-tile-k "$KERNEL_TILE_K" \
+        --kernel-stages "$KERNEL_STAGES" \
+        --kernel-cluster-m "$KERNEL_CLUSTER_M" \
+        --kernel-cluster-n "$KERNEL_CLUSTER_N" \
         --log-interval 500 \
         --phase-tag "h200_prod_gpu${gpu_idx}" \
         > "$log" 2>&1 &

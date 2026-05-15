@@ -15,8 +15,9 @@
 
 template <class ElementOut_, typename TileShape_MNKR, int KStages_, int cM = 1,
           int cN = 1, bool Is_Even_M = true, bool Is_Even_N = true,
-          bool SkipReduction = false, bool SkipDenoising = false,
-          bool EnableDebug = false, bool MineOnly = false>
+          int MmaRegisters = 0, bool SkipReduction = false,
+          bool SkipDenoising = false, bool EnableDebug = false,
+          bool MineOnly = false>
 void run_pearl_gemm(PearlAPIParams const& params, cudaStream_t stream = 0) {
   using namespace cute;
 
@@ -32,7 +33,7 @@ void run_pearl_gemm(PearlAPIParams const& params, cudaStream_t stream = 0) {
       pearl::KernelTraits<ElementIn, ElementOut, ElementDenoise, ElementScale,
                           TileShape_MNKR, Is_Even_M, Is_Even_N, cM, cN,
                           SkipReduction, SkipDenoising, KStages, EnableDebug,
-                          MineOnly>;
+                          MmaRegisters, MineOnly>;
   using CollectiveEpilogue = pearl::CollectiveEpilogue<KTraits>;
   typename CollectiveEpilogue::Arguments epilogue_args{
       .ptr_C = static_cast<ElementOut*>(params.ptr_C),
@@ -134,7 +135,7 @@ void run_pearl_gemm(PearlAPIParams const& params, cudaStream_t stream = 0) {
 
 template <class ElementOut_, typename TileShape_MNKR, int KStages_, int cM = 1,
           int cN = 1, bool Is_Even_M = true, bool Is_Even_N = true,
-          bool EnableDebug = false>
+          int MmaRegisters = 0, bool EnableDebug = false>
 void run_pearl_mine(PearlAPIParams const& params, cudaStream_t stream = 0) {
   using namespace cute;
 
@@ -153,7 +154,7 @@ void run_pearl_mine(PearlAPIParams const& params, cudaStream_t stream = 0) {
       pearl::KernelTraits<ElementIn, ElementOut, ElementDenoise, ElementScale,
                           TileShape_MNKR, Is_Even_M, Is_Even_N, cM, cN,
                           SkipReduction, SkipDenoising, KStages, EnableDebug,
-                          MineOnly>;
+                          MmaRegisters, MineOnly>;
   using CollectiveMainloop = pearl::CollectiveMainloop<KTraits>;
 
   using ClusterShape = typename KTraits::ClusterShape_MNK;

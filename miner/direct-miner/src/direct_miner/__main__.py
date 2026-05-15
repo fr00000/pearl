@@ -62,6 +62,35 @@ def main():
              "denoising, output scaling, and C stores while preserving "
              "the PoW signal/proof path."
     )
+    parser.add_argument(
+        "--kernel-tile-m", type=int, default=128,
+        help="main mining kernel tile M dimension"
+    )
+    parser.add_argument(
+        "--kernel-tile-n", type=int, default=256,
+        help="main mining kernel tile N dimension"
+    )
+    parser.add_argument(
+        "--kernel-tile-k", type=int, default=128,
+        help="main mining kernel tile K dimension"
+    )
+    parser.add_argument(
+        "--kernel-cluster-m", type=int, default=1,
+        help="main mining kernel cluster M dimension"
+    )
+    parser.add_argument(
+        "--kernel-cluster-n", type=int, default=1,
+        help="main mining kernel cluster N dimension"
+    )
+    parser.add_argument(
+        "--kernel-stages", type=int, default=None,
+        help="main mining kernel pipeline stages"
+    )
+    parser.add_argument(
+        "--kernel-mma-registers", type=int, default=None,
+        help="explicit MMA warpgroup register allocation; default uses "
+             "the kernel heuristic"
+    )
     args = parser.parse_args()
 
     setup_logging(args.log_level)
@@ -76,6 +105,13 @@ def main():
         enable_b_cache=args.enable_b_cache,
         enable_diagnostics=args.enable_diagnostics,
         enable_headless_kernel=args.enable_headless_kernel,
+        kernel_tile_size_m=args.kernel_tile_m,
+        kernel_tile_size_n=args.kernel_tile_n,
+        kernel_tile_size_k=args.kernel_tile_k,
+        kernel_cluster_size_m=args.kernel_cluster_m,
+        kernel_cluster_size_n=args.kernel_cluster_n,
+        kernel_pipeline_stages=args.kernel_stages,
+        kernel_mma_registers=args.kernel_mma_registers,
     )
 
     miner = DirectMiner(config)

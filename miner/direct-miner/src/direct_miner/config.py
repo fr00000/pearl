@@ -78,5 +78,17 @@ class MinerConfig:
     # win, but skips denoising, output scaling, and C stores.
     enable_headless_kernel: bool = False
 
+    # Main mining kernel launch parameters. These are separate from
+    # MiningConfiguration: changing cluster/stage values should not
+    # change proof semantics, while changing tile sizes must be treated
+    # carefully because it can change the extracted row/column pattern.
+    kernel_tile_size_m: int = 128
+    kernel_tile_size_n: int = 256
+    kernel_tile_size_k: int = 128
+    kernel_cluster_size_m: int = 1
+    kernel_cluster_size_n: int = 1
+    kernel_pipeline_stages: int | None = None
+    kernel_mma_registers: int | None = None
+
 
 DEFAULT_CONFIG: Final = MinerConfig()

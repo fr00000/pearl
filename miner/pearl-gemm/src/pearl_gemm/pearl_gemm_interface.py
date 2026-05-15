@@ -352,6 +352,7 @@ def noisy_gemm(
     cluster_size_m: int = 1,
     cluster_size_n: int = 1,
     pipeline_stages: int | None = None,
+    mma_registers: int | None = None,
     swizzle: int | None = None,
     swizzle_n_maj: bool = True,
     tile_size_m_noising_A: int | None = None,
@@ -418,6 +419,8 @@ def noisy_gemm(
         tile_size_n: Allowed values are [64, 128, 192, 256].
         pipeline_stages: The number of stages in the mainloop pipeline.
             If None, pick the largest number that fits in SMEM, up to 5.
+        mma_registers: Optional explicit warpgroup register allocation for
+            the main mining/GEMM kernel. None uses the compiled default.
         cluster_size_m: Number of CTAs in cluster in M direction.
         cluster_size_n: Number of CTAs in cluster in N direction.
         swizzle: We assign (tile_size_m x tile_size_n) output tiles to
@@ -481,6 +484,7 @@ def noisy_gemm(
         cluster_size_m,
         cluster_size_n,
         pipeline_stages,
+        mma_registers,
         swizzle,
         swizzle_n_maj,
         tile_size_m_noising_A,
@@ -528,6 +532,7 @@ def headless_mine(
     cluster_size_m: int = 1,
     cluster_size_n: int = 1,
     pipeline_stages: int | None = None,
+    mma_registers: int | None = None,
     swizzle: int | None = None,
     swizzle_n_maj: bool = True,
     tile_size_m_noising_A: int | None = None,
@@ -571,6 +576,7 @@ def headless_mine(
         cluster_size_m,
         cluster_size_n,
         pipeline_stages,
+        mma_registers,
         swizzle,
         swizzle_n_maj,
         tile_size_m_noising_A,
@@ -620,6 +626,7 @@ def _abstract_noisy_gemm(
     cluster_size_m=1,
     cluster_size_n=1,
     pipeline_stages=None,
+    mma_registers=None,
     swizzle=None,
     swizzle_n_maj=True,
     tile_size_m_noising_A=None,
@@ -669,6 +676,7 @@ def _abstract_headless_mine(
     cluster_size_m=1,
     cluster_size_n=1,
     pipeline_stages=None,
+    mma_registers=None,
     swizzle=None,
     swizzle_n_maj=True,
     tile_size_m_noising_A=None,
