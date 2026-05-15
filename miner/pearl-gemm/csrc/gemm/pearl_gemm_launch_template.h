@@ -56,3 +56,22 @@ void run_pearl_gemm_(PearlAPIParams& params, cudaStream_t stream = 0) {
 
       ););
 }
+
+template <class ElementOut, int R, int bM, int bN, int bK, int kStages,
+          int cM = 1, int cN = 1, bool EnableDebug = false>
+void run_pearl_mine_(PearlAPIParams& params, cudaStream_t stream = 0) {
+  using namespace cute;
+  using TileShape_MNKR = Shape<Int<bM>, Int<bN>, Int<bK>, Int<R>>;
+  bool is_even_m = params.m % get<0>(TileShape_MNKR{}) == 0;
+  bool is_even_n = params.n % get<1>(TileShape_MNKR{}) == 0;
+
+  BOOL_SWITCH(
+      is_even_m, IsEvenM,
+      BOOL_SWITCH(
+          is_even_n, IsEvenN,
+
+          run_pearl_mine<ElementOut, TileShape_MNKR, kStages, cM, cN, IsEvenM,
+                         IsEvenN, EnableDebug>(params, stream);
+
+      ););
+}

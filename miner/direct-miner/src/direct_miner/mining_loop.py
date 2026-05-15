@@ -156,6 +156,7 @@ class DirectMiner:
             noise_rank=settings.noise_rank,
             host_signal_sync_size=host_signal_sync_size,
             scratchpad_bytes=scratchpad_bytes,
+            allocate_c=not self.config.enable_headless_kernel,
         )
 
         logger.info(

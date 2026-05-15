@@ -6,6 +6,10 @@ template <class ElementOut, int R, int bM, int bN, int bK, int kStages, int cM,
           bool MineOnly = false>
 void run_pearl_gemm_(PearlAPIParams& params, cudaStream_t stream);
 
+template <class ElementOut, int R, int bM, int bN, int bK, int kStages, int cM,
+          int cN, bool EnableDebug>
+void run_pearl_mine_(PearlAPIParams& params, cudaStream_t stream);
+
 template <class ElementDenoise_AxEBL, int R, int bM_noising, int bK_noising,
           int kStages>
 void run_pearl_noising_A_(PearlAPIParams& params, cudaStream_t stream);

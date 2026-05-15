@@ -266,9 +266,24 @@ struct KernelTraits {
     };
   };
 
+  struct SharedStorageMineOnly : cute::aligned_struct<128> {
+    struct {
+      cute::array_aligned<ElementIn, cute::cosize_v<SmemLayoutA>,
+                          cutlass::detail::alignment_for_swizzle(SmemLayoutA{})>
+          smem_A;
+      cute::array_aligned<ElementIn, cute::cosize_v<SmemLayoutB>,
+                          cutlass::detail::alignment_for_swizzle(SmemLayoutB{})>
+          smem_B;
+    };
+
+    typename MainloopPipeline::SharedStorage pipeline;
+  };
+
   using SharedStorage =
-      cute::conditional_t<SkipDenoising, SharedStorageNoDenoise,
-                          SharedStorageDenoise>;
+      cute::conditional_t<
+          MineOnly, SharedStorageMineOnly,
+          cute::conditional_t<SkipDenoising, SharedStorageNoDenoise,
+                              SharedStorageDenoise>>;
 };
 
 }  // namespace pearl
