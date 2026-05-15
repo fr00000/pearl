@@ -195,7 +195,7 @@ winner from `H100_SXM_VERIFY.md`:
 --max-in-flight 4 \
 --enable-b-cache \
 --enable-headless-kernel \
---kernel-tile-m 64 \
+--kernel-tile-m 128 \
 --kernel-tile-n 256 \
 --kernel-tile-k 128 \
 --kernel-stages 3 \
@@ -203,8 +203,9 @@ winner from `H100_SXM_VERIFY.md`:
 --kernel-cluster-n 1
 ```
 
-That configuration sustained **3,512,843 tiles/s** on H100 SXM. It has not yet
-been separately re-swept on H200 after the headless/tile-kernel changes, but it
-is the best measured direct-miner setting and is safe to override via
+That configuration sustained **2,503,688 raw outer-tiles/s** on H100 SXM and is
+the best measured normalized PoW-attempt setting. It has not yet been
+separately re-swept on H200 after the headless/tile-kernel changes, but it is
+the best measured direct-miner setting and is safe to override via
 `SHAPE_*`, `MAX_IN_FLIGHT`, and `KERNEL_*` environment variables if H200 needs a
 local confirmation sweep.

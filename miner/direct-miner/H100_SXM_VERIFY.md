@@ -21,7 +21,7 @@ uv run direct-miner \
   --max-in-flight 4 \
   --enable-b-cache \
   --enable-headless-kernel \
-  --kernel-tile-m 64 \
+  --kernel-tile-m 128 \
   --kernel-tile-n 256 \
   --kernel-tile-k 128 \
   --kernel-stages 3 \
@@ -29,8 +29,9 @@ uv run direct-miner \
   --kernel-cluster-n 1
 ```
 
-Confirmed 5-minute rate: **3,512,843 tiles/s per GPU**. The startup scripts
-use this by default.
+Confirmed 5-minute rate: **2,503,688 raw outer-tiles/s per GPU**, which is
+also **2,503,688 normalized 128-tile-equivalent attempts/s**. The startup
+scripts use this by default.
 
 ## Results
 
@@ -78,8 +79,9 @@ The H200's wider 4.8 TB/s HBM bus (vs H100's 3.4 TB/s) doesn't separate the two 
 - Diagnostics off (default after the recent flag rename)
 - Expected per-GPU tile rate: **~2.1 M tiles/s** sustained
 
-This was the best setting before the dedicated headless kernel and
-`64x256x128, c2x1` tile sweep. Keep it only as a conservative fallback.
+This was the best setting before the dedicated headless kernel, wider
+`n=524032` shape, and `128x256x128, c2x1` cluster tuning. Keep it only as a
+conservative fallback.
 
 ## Caveats
 
@@ -509,18 +511,26 @@ PATTERN_COMPATIBLE=true
 
 One-minute production-shape sweep:
 
-| Variant | Source | Tiles/s |
-|---|---:|---:|
-| 64x256x128, c2x1, default regs | final | 3 520 483 |
-| 64x256x128, c2x1, regs=224 | final | 3 520 104 |
-| 64x256x128, c2x1, regs=192 | last steady log | 3 517 276 |
-| 64x256x128, c2x1, regs=128 | last steady log | 3 517 018 |
-| 64x256x128, c2x1, regs=160 | last steady log | 3 496 877 |
-| 64x256x128, c1x1, default/explicit regs | mixed | ~2 944 000 - 2 959 000 |
-| 128x256x128, c2x1, regs=160 | final | 2 510 826 |
-| 128x256x128, c2x1, default regs | final | 2 502 826 |
+Important correction: the direct-miner `tile_rate` log field is raw CTA /
+outer-tile rate. When `tile_m` changes, it is not an apples-to-apples count of
+lottery tickets. `tile_m=64` has one MMA warpgroup and 128 MMA consumer
+threads; `tile_m=128` has two MMA warpgroups and 256 MMA consumer threads.
+Each MMA consumer thread performs one PoW check per CTA, so `64x256` raw
+outer-tile rates must be multiplied by `64 / 128 = 0.5` before comparing them
+to `128x256` variants.
 
-Five-minute confirmation for the best variant:
+| Variant | Source | Raw outer-tiles/s | Normalized 128-equivalent attempts/s |
+|---|---:|---:|---:|
+| 64x256x128, c2x1, default regs | final | 3 520 483 | 1 760 242 |
+| 64x256x128, c2x1, regs=224 | final | 3 520 104 | 1 760 052 |
+| 64x256x128, c2x1, regs=192 | last steady log | 3 517 276 | 1 758 638 |
+| 64x256x128, c2x1, regs=128 | last steady log | 3 517 018 | 1 758 509 |
+| 64x256x128, c2x1, regs=160 | last steady log | 3 496 877 | 1 748 439 |
+| 64x256x128, c1x1, default/explicit regs | mixed | ~2 944 000 - 2 959 000 | ~1 472 000 - 1 479 500 |
+| 128x256x128, c2x1, regs=160 | final | 2 510 826 | 2 510 826 |
+| 128x256x128, c2x1, default regs | final | 2 502 826 | 2 502 826 |
+
+Five-minute confirmation for the raw-fast but normalized-worse 64-row variant:
 
 ```text
 Variant: 64x256x128, c2x1, s3, default regs
@@ -531,21 +541,31 @@ Tile rate: 3 512 843 tiles/s
 B-cache: hits=4341 misses=4 invalidations=3
 ```
 
-This supersedes the earlier tile-shape conclusion. With the production
-`n=524032` shape, direct-miner tile accounting, headless kernel, and B-cache
-enabled, `64x256x128, c2x1, s3` is about:
+This does **not** supersede the earlier tile-shape conclusion. With the
+production `n=524032` shape, direct-miner raw outer-tile accounting, headless
+kernel, and B-cache enabled, `64x256x128, c2x1, s3` looked about:
 
 ```text
 3 512 843 / 2 503 688 = 1.403x
 ```
 
-or roughly **+40%** over the prior 5-minute production winner.
+or roughly **+40%** on raw CTA rate, but after normalizing for the half-sized
+MMA consumer thread count:
+
+```text
+(3 512 843 * 0.5) / 2 503 688 = 0.701x
+```
+
+So `64x256x128` produces about **30% fewer PoW attempts/s** than the
+`128x256x128, c2x1, s3` production kernel. The 64-row result is retained here
+as a case study in why raw direct-miner `tile_rate` must be normalized when
+changing `tile_m`.
 
 Recommended production kernel flags:
 
 ```bash
 --enable-headless-kernel \
---kernel-tile-m 64 \
+--kernel-tile-m 128 \
 --kernel-tile-n 256 \
 --kernel-tile-k 128 \
 --kernel-stages 3 \
@@ -553,5 +573,6 @@ Recommended production kernel flags:
 --kernel-cluster-n 1
 ```
 
-Do not pass `--kernel-mma-registers` for this winner. The default register
-heuristic was equal to or slightly better than the explicit values.
+Do not pass `--kernel-mma-registers` for the production default yet. The
+`regs=160` 128-row variant was only a tiny one-minute improvement over default
+and has not been five-minute confirmed.

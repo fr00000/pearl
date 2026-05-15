@@ -39,7 +39,7 @@ SHAPE_M=8192
 SHAPE_N=524032
 SHAPE_K=8192
 MAX_IN_FLIGHT=4
-KERNEL_TILE_M=64
+KERNEL_TILE_M=128
 KERNEL_TILE_N=256
 KERNEL_TILE_K=128
 KERNEL_STAGES=3
@@ -449,9 +449,9 @@ done
 [[ "$LAUNCHED" -ge 1 ]] || die "No miners successfully launched"
 
 # ===== Done =====
-EXPECTED_TILES_PER_GPU=3510000
+EXPECTED_TILES_PER_GPU=2500000
 EXPECTED_TILES=$((LAUNCHED * EXPECTED_TILES_PER_GPU))
-EXPECTED_MM=$(awk -v g="$LAUNCHED" 'BEGIN { printf "%.1f", g * 13.4 }')
+EXPECTED_MM=$(awk -v g="$LAUNCHED" 'BEGIN { printf "%.1f", g * 19.1 }')
 
 cat <<EOF
 
@@ -464,8 +464,8 @@ cat <<EOF
   Miners failed:     $FAILED
   Production shape:  ${SHAPE_M} × ${SHAPE_N} × ${SHAPE_K}, mif=$MAX_IN_FLIGHT
   Kernel:            ${KERNEL_TILE_M}×${KERNEL_TILE_N}×${KERNEL_TILE_K}, stages=$KERNEL_STAGES, cluster=${KERNEL_CLUSTER_M}×${KERNEL_CLUSTER_N}, headless
-  Expected per-GPU:  ~3.51 M tiles/s (~13.4 mm/s)
-  Expected total:    ~${EXPECTED_TILES} tiles/s (~${EXPECTED_MM} mm/s aggregate)
+  Expected per-GPU:  ~2.50 M 128-equivalent attempts/s (~19.1 mm/s)
+  Expected total:    ~${EXPECTED_TILES} 128-equivalent attempts/s (~${EXPECTED_MM} mm/s aggregate)
 
 Useful commands:
   Per-GPU rate (latest sample):
