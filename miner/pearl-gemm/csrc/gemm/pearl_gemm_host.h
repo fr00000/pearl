@@ -75,6 +75,8 @@ void run_pearl_gemm(PearlAPIParams const& params, cudaStream_t stream = 0) {
       .host_signal_sync = static_cast<HostSignalSync*>(params.host_signal_sync),
       .problem_shape = problem_shape,
       .inner_hash_counter = params.inner_hash_counter,
+      .pow_diagnostics =
+          static_cast<PowDiagnostics*>(params.pow_diagnostics),
       .ptr_pow_target = static_cast<uint32_t const*>(params.ptr_pow_target),
       .ptr_pow_key = static_cast<uint32_t const*>(params.ptr_pow_key)};
   typename CollectiveMainloop::Params mainloop_params =
@@ -177,6 +179,8 @@ void run_pearl_mine(PearlAPIParams const& params, cudaStream_t stream = 0) {
       .host_signal_sync = static_cast<HostSignalSync*>(params.host_signal_sync),
       .problem_shape = problem_shape,
       .inner_hash_counter = params.inner_hash_counter,
+      .pow_diagnostics =
+          static_cast<PowDiagnostics*>(params.pow_diagnostics),
       .ptr_pow_target = static_cast<uint32_t const*>(params.ptr_pow_target),
       .ptr_pow_key = static_cast<uint32_t const*>(params.ptr_pow_key)};
   typename CollectiveMainloop::Params mainloop_params =

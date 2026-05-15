@@ -16,6 +16,7 @@
 
 #include "blake3/blake3_constants.hpp"
 #include "host_signal_header.hpp"
+#include "pow_diagnostics.hpp"
 #include "pow_utils.hpp"
 #include "utils.h"
 
@@ -85,6 +86,7 @@ struct CollectiveMainloop {
     void* host_signal_sync;
     ProblemShape const problem_shape;
     uint64_t* inner_hash_counter;
+    PowDiagnostics* pow_diagnostics;
     uint32_t const* ptr_pow_target;
     uint32_t const* ptr_pow_key;
   };
@@ -100,6 +102,7 @@ struct CollectiveMainloop {
     HostSignalSync* host_signal_sync;
     ProblemShape const problem_shape;
     uint64_t* inner_hash_counter;
+    PowDiagnostics* pow_diagnostics;
     uint32_t const* ptr_pow_target;
     uint32_t const* ptr_pow_key;
   };
@@ -132,6 +135,7 @@ struct CollectiveMainloop {
                 reinterpret_cast<HostSignalSync*>(args.host_signal_sync),
             .problem_shape = args.problem_shape,
             .inner_hash_counter = args.inner_hash_counter,
+            .pow_diagnostics = args.pow_diagnostics,
             .ptr_pow_target = args.ptr_pow_target,
             .ptr_pow_key = args.ptr_pow_key};
   }

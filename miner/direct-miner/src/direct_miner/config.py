@@ -78,6 +78,12 @@ class MinerConfig:
     # win, but skips denoising, output scaling, and C stores.
     enable_headless_kernel: bool = False
 
+    # Benchmark-only kernel hash observability. When enabled, the mining
+    # kernel updates a tiny diagnostics buffer with per-call attempt count
+    # and best observed hash. Disabled by default because it adds atomics
+    # to the PoW check path.
+    enable_kernel_hash_stats: bool = False
+
     # Main mining kernel launch parameters. These are separate from
     # MiningConfiguration: changing cluster/stage values should not
     # change proof semantics, while changing tile sizes must be treated

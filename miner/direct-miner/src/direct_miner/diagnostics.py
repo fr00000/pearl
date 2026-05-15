@@ -5,13 +5,10 @@ Writes append-only JSONL for offline analysis.
 
 Designed to run continuously through Phase B and beyond.
 
-NOTE on best-hash observability (Case B):
-The kernel does not expose per-call best-tile-hash. host_signal_header is
-written ONLY on a winning tile (status flips kSignalIdle->kSignalTriggered)
-and even then captures tile/thread coordinates and the target, not the
-hash value itself. So `best_observed_hash_log2` and `margin_log2` are
-always null. We instead record `block_found` — the actual win signal,
-read from header.status in the on-complete callback.
+Kernel best-hash observability is opt-in. When enabled, the CUDA kernel
+updates a tiny diagnostics buffer with the per-call attempt count and the
+lowest observed hash prefix. Production leaves this disabled to avoid
+adding atomics to the PoW hot path.
 """
 
 import json
@@ -21,6 +18,8 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
+
+import torch
 
 
 logger = logging.getLogger(__name__)
@@ -35,8 +34,12 @@ class MatmulMetrics:
     template_height: int | None
     template_hash_prefix: str | None
     target_log2: float | None
-    best_observed_hash_log2: float | None  # always null in Case B
-    margin_log2: float | None              # always null in Case B
+    best_observed_hash_log2: float | None
+    margin_log2: float | None
+    kernel_hash_attempts: int | None
+    kernel_best_hash_hex: str | None
+    kernel_best_tile_coord: list[int] | None
+    kernel_best_thread_idx: int | None
     block_found: bool | None
     b_cache_hit: bool | None
 
@@ -87,6 +90,10 @@ class DiagnosticsCollector:
         template_hash_prefix: str | None,
         target_log2: float | None,
         best_observed_hash_log2: float | None,
+        kernel_hash_attempts: int | None = None,
+        kernel_best_hash_hex: str | None = None,
+        kernel_best_tile_coord: list[int] | None = None,
+        kernel_best_thread_idx: int | None = None,
         block_found: bool | None = None,
         b_cache_hit: bool | None = None,
     ) -> None:
@@ -122,6 +129,10 @@ class DiagnosticsCollector:
             target_log2=target_log2,
             best_observed_hash_log2=best_observed_hash_log2,
             margin_log2=margin_log2,
+            kernel_hash_attempts=kernel_hash_attempts,
+            kernel_best_hash_hex=kernel_best_hash_hex,
+            kernel_best_tile_coord=kernel_best_tile_coord,
+            kernel_best_thread_idx=kernel_best_thread_idx,
             block_found=block_found,
             b_cache_hit=b_cache_hit,
         )
@@ -185,3 +196,37 @@ def target_to_log2(target_int: int) -> float:
     if target_int <= 0:
         return float("-inf")
     return math.log2(target_int)
+
+
+def decode_pow_diagnostics(tensor: torch.Tensor) -> dict:
+    """Decode the CUDA PowDiagnostics uint32 buffer.
+
+    Layout is defined in csrc/gemm/pow_diagnostics.hpp. The kernel chooses the
+    best record by most-significant 32 bits, then stores the full selected hash
+    words for offline inspection.
+    """
+    values = [int(v) for v in tensor.detach().cpu().tolist()]
+    if len(values) < 16:
+        raise ValueError(f"pow diagnostics buffer too small: {len(values)}")
+
+    attempts = values[0]
+    hash_words = values[4:12]
+    best_hash_int = sum(word << (32 * i) for i, word in enumerate(hash_words))
+    best_hash_hex = (
+        best_hash_int.to_bytes(32, byteorder="little").hex()
+        if attempts > 0
+        else None
+    )
+    best_hash_log2 = (
+        math.log2(best_hash_int)
+        if best_hash_int > 0
+        else (float("-inf") if attempts > 0 else None)
+    )
+
+    return {
+        "kernel_hash_attempts": attempts,
+        "kernel_best_hash_hex": best_hash_hex,
+        "kernel_best_hash_log2": best_hash_log2,
+        "kernel_best_tile_coord": values[12:15] if attempts > 0 else None,
+        "kernel_best_thread_idx": values[15] if attempts > 0 else None,
+    }

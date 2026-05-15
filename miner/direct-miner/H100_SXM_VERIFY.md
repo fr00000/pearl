@@ -639,3 +639,53 @@ Conclusion:
 - Do not sweep `tile_n=128/512` as a simple runtime setting. The default proof
   column pattern reaches columns 248/249, so non-256 N tiles need a separate
   proof-pattern design before they can be production candidates.
+
+## Addendum: opt-in kernel hash observability
+
+The next kernel-support change is benchmark-only observability for the PoW hash
+path. It adds an optional per-slot `PowDiagnostics` buffer to `noisy_gemm` and
+`headless_mine`. When the pointer is null, the kernel takes the existing
+production path. When enabled, each PoW check increments an attempt counter and
+the kernel stores the best observed hash prefix for the completed call.
+
+Direct miner flag:
+
+```bash
+--enable-kernel-hash-stats
+```
+
+Recommended benchmark usage:
+
+```bash
+--enable-kernel-hash-stats \
+--enable-diagnostics \
+--metrics-output /workspace/kernel-hash-smoke.jsonl
+```
+
+New JSONL fields:
+
+```text
+kernel_hash_attempts
+kernel_best_hash_hex
+kernel_best_tile_coord
+kernel_best_thread_idx
+best_observed_hash_log2
+margin_log2
+```
+
+This is intentionally not a production default. The diagnostic path adds
+atomics to the PoW hot path and is meant to answer, "is this kernel producing a
+reasonable hash distribution?" without waiting for a rare network win. It does
+not alter proof generation, gateway submission, or the host-signal winner path.
+
+Validation:
+
+- Built and installed `pearl-gemm` on the H100 pod after adding the diagnostics
+  pointer through `PearlAPIParams`, `CollectiveMainloop`, and both GEMM entry
+  points.
+- Verified `get_pow_diagnostics_size() == 16`.
+- Ran a 70-second smoke with `m=1024 n=8192 k=8192`, B-cache, headless kernel,
+  diagnostics, and kernel hash stats. The run completed 84 matmuls and wrote 84
+  JSONL records.
+- Each record reported `kernel_hash_attempts=65536`, matching the expected
+  `256` outer tiles × `256` MMA consumer threads for that smoke shape.

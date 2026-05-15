@@ -63,6 +63,11 @@ def main():
              "the PoW signal/proof path."
     )
     parser.add_argument(
+        "--enable-kernel-hash-stats", action="store_true",
+        help="enable benchmark-only kernel best-hash diagnostics. "
+             "Adds atomics to the PoW path, so leave off for production."
+    )
+    parser.add_argument(
         "--kernel-tile-m", type=int, default=128,
         help="main mining kernel tile M dimension"
     )
@@ -105,6 +110,7 @@ def main():
         enable_b_cache=args.enable_b_cache,
         enable_diagnostics=args.enable_diagnostics,
         enable_headless_kernel=args.enable_headless_kernel,
+        enable_kernel_hash_stats=args.enable_kernel_hash_stats,
         kernel_tile_size_m=args.kernel_tile_m,
         kernel_tile_size_n=args.kernel_tile_n,
         kernel_tile_size_k=args.kernel_tile_k,

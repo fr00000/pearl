@@ -16,6 +16,7 @@
 #include "pearl_api_params.h"
 #include "pearl_gemm_constants.hpp"
 #include "pearl_gemm_decl.h"
+#include "pow_diagnostics.hpp"
 #include "quantize_kernel.hpp"
 #include "static_switch.h"
 
@@ -52,6 +53,10 @@ int64_t get_host_signal_header_size() {
 
 int64_t get_host_signal_sync_size() {
   return sizeof(HostSignalSync);
+}
+
+int64_t get_pow_diagnostics_size() {
+  return pow_diagnostics_u32_size;
 }
 
 std::string print_range(const auto& begin, const auto& end, const char* name) {
@@ -379,6 +384,7 @@ void noise_A(at::Tensor& A,                          // m x k
   params.k_blocks_per_split_noising_A = k_blocks_per_split;
   params.k_blocks_per_split_noising_B = 0;
   params.inner_hash_counter = nullptr;
+  params.pow_diagnostics = nullptr;
   params.ptr_pow_target = nullptr;
   params.ptr_pow_key = nullptr;
 
@@ -480,6 +486,7 @@ void noise_B(at::Tensor& B,                          // n x k
   params.k_blocks_per_split_noising_A = 0;
   params.k_blocks_per_split_noising_B = k_blocks_per_split;
   params.inner_hash_counter = nullptr;
+  params.pow_diagnostics = nullptr;
   params.ptr_pow_target = nullptr;
   params.ptr_pow_key = nullptr;
 
@@ -586,6 +593,8 @@ void gemm(at::Tensor& A,         // m x k
 
   params.k_blocks_per_split_noising_A = 0;
   params.k_blocks_per_split_noising_B = 0;
+  params.inner_hash_counter = nullptr;
+  params.pow_diagnostics = nullptr;
 
   params.ptr_pow_target = nullptr;
   params.ptr_pow_key = nullptr;
@@ -656,7 +665,8 @@ void noisy_gemm(
     bool skip_reduction = false, bool skip_denoising = false,
     bool mine_only = false,
     std::optional<at::Tensor> inner_hash_counter = std::nullopt,
-    bool enable_debug = false) {
+    bool enable_debug = false,
+    std::optional<at::Tensor> pow_diagnostics = std::nullopt) {
   auto dprops = at::cuda::getCurrentDeviceProperties();
   bool const effective_skip_denoising = skip_denoising || mine_only;
 
@@ -862,6 +872,19 @@ void noisy_gemm(
     params.inner_hash_counter = nullptr;
   }
 
+  if (pow_diagnostics.has_value()) {
+    at::Tensor pow_diagnostics_tensor = pow_diagnostics.value();
+    CHECK_DEVICE(pow_diagnostics_tensor);
+    CHECK_CONTIGUOUS(pow_diagnostics_tensor);
+    TORCH_CHECK(pow_diagnostics_tensor.scalar_type() == torch::kUInt32,
+                "pow_diagnostics must be uint32 dtype. It currently has ",
+                c10::toString(pow_diagnostics_tensor.scalar_type()), ".");
+    CHECK_SHAPE(pow_diagnostics_tensor, get_pow_diagnostics_size());
+    params.pow_diagnostics = pow_diagnostics_tensor.data_ptr();
+  } else {
+    params.pow_diagnostics = nullptr;
+  }
+
   // PoW target and key
   params.ptr_pow_target = pow_target.data_ptr();
   params.ptr_pow_key = pow_key.data_ptr();
@@ -1003,7 +1026,8 @@ void headless_mine(
     std::optional<int64_t> k_blocks_per_split_noising_B_ = std::nullopt,
     bool run_noising_a = true, bool run_noising_b = true,
     std::optional<at::Tensor> inner_hash_counter = std::nullopt,
-    bool enable_debug = false) {
+    bool enable_debug = false,
+    std::optional<at::Tensor> pow_diagnostics = std::nullopt) {
   at::Tensor A_scales_dummy =
       torch::empty({0}, A.options().dtype(torch::kFloat32));
   at::Tensor B_scales_dummy =
@@ -1021,7 +1045,8 @@ void headless_mine(
              tile_size_k_noising_B_, pipeline_stages_noising_A,
              pipeline_stages_noising_B, k_blocks_per_split_noising_A_,
              k_blocks_per_split_noising_B_, run_noising_a, run_noising_b,
-             false, true, true, inner_hash_counter, enable_debug);
+             false, true, true, inner_hash_counter, enable_debug,
+             pow_diagnostics);
 }
 
 void quantize(const at::Tensor& input, const at::Tensor& output,
@@ -1167,6 +1192,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Calculate host signal header buffer size");
   m.def("get_host_signal_sync_size", &get_host_signal_sync_size,
         "Calculate host signal sync buffer size");
+  m.def("get_pow_diagnostics_size", &get_pow_diagnostics_size,
+        "Calculate pow diagnostics buffer size");
   m.def("get_required_scratchpad_bytes", &get_required_scratchpad_bytes,
         "Calculate required scratchpad bytes for given matrix size",
         py::arg("matrix_bytes"),
@@ -1287,7 +1314,8 @@ TORCH_LIBRARY(pearl_gemm, m) {
       "    bool skip_denoising = False, "
       "    bool mine_only = False, "
       "    Tensor(inner_hash_counter!)? inner_hash_counter = None, "
-      "    bool enable_debug = False"
+      "    bool enable_debug = False, "
+      "    Tensor(pow_diagnostics!)? pow_diagnostics = None"
       ") -> ()",
       {at::Tag::pt2_compliant_tag});
 
@@ -1333,7 +1361,8 @@ TORCH_LIBRARY(pearl_gemm, m) {
       "    bool run_noising_A = True, "
       "    bool run_noising_B = False, "
       "    Tensor(inner_hash_counter!)? inner_hash_counter = None, "
-      "    bool enable_debug = False"
+      "    bool enable_debug = False, "
+      "    Tensor(pow_diagnostics!)? pow_diagnostics = None"
       ") -> ()",
       {at::Tag::pt2_compliant_tag});
 

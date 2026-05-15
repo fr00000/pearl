@@ -45,6 +45,9 @@ struct PearlAPIParams {
   // Optional counter for validating inner hash calls (nullptr to disable)
   uint64_t* inner_hash_counter;
 
+  // Optional best-hash diagnostics buffer (nullptr to disable)
+  void* __restrict__ pow_diagnostics;
+
   // PoW target and key (uint256, LE word order)
   void const* __restrict__ ptr_pow_target;  // uint32_t[8]
   void const* __restrict__ ptr_pow_key;     // uint32_t[8]

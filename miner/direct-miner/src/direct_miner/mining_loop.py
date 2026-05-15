@@ -11,6 +11,7 @@ from miner_base.commitment_hash import CommitmentHasher
 from miner_base.gpu_matmul_config import GPUMatmulConfigFactory
 from pearl_gemm import (
     get_host_signal_sync_size,
+    get_pow_diagnostics_size,
     get_required_scratchpad_bytes,
 )
 from vllm_miner.mining_state import (
@@ -29,7 +30,11 @@ from .attempt_metrics import (
 from .b_cache import BSideCache
 from .completion_tracker import CompletionTracker
 from .config import MinerConfig
-from .diagnostics import DiagnosticsCollector, target_to_log2
+from .diagnostics import (
+    DiagnosticsCollector,
+    decode_pow_diagnostics,
+    target_to_log2,
+)
 from .mining_call import UnsafeSlotReleaseError, pearl_gemm_noisy_phase_c
 from .synthetic_data import FixedBPool
 
@@ -60,6 +65,7 @@ class DirectMiner:
                 flush_every_n=100,
                 phase_tag=config.phase_tag,
             )
+        if config.enable_diagnostics or config.enable_kernel_hash_stats:
             on_complete = self._on_matmul_complete
         else:
             on_complete = None
@@ -108,6 +114,8 @@ class DirectMiner:
         self._launch_count: int = 0
 
         self._matmul_config = None  # built in initialize()
+        self._kernel_best_margin_log2: float | None = None
+        self._kernel_hash_records: int = 0
 
         # Per-template diagnostic metadata cache.
         self._meta_cache_header_bytes: bytes | None = None
@@ -164,6 +172,11 @@ class DirectMiner:
                 self.config.shapes.n * self.config.shapes.k)
         )
         host_signal_sync_size = get_host_signal_sync_size()
+        pow_diagnostics_size = (
+            get_pow_diagnostics_size()
+            if self.config.enable_kernel_hash_stats
+            else None
+        )
         self.a_pool = ASlotPool(
             num_slots=self.config.max_in_flight,
             m=self.config.shapes.m,
@@ -172,6 +185,7 @@ class DirectMiner:
             noise_rank=settings.noise_rank,
             host_signal_sync_size=host_signal_sync_size,
             scratchpad_bytes=scratchpad_bytes,
+            pow_diagnostics_size=pow_diagnostics_size,
             allocate_c=not self.config.enable_headless_kernel,
         )
 
@@ -184,6 +198,7 @@ class DirectMiner:
             f"{self._normalized_attempts_per_matmul:.1f} "
             f"max_in_flight={self.config.max_in_flight} "
             f"headless_kernel={self.config.enable_headless_kernel} "
+            f"kernel_hash_stats={self.config.enable_kernel_hash_stats} "
             f"kernel={self.config.kernel_tile_size_m}x"
             f"{self.config.kernel_tile_size_n}x"
             f"{self.config.kernel_tile_size_k} "
@@ -295,13 +310,55 @@ class DirectMiner:
         }
 
     def _on_matmul_complete(self, metadata: dict) -> None:
+        kernel_stats = None
+        pow_diagnostics = metadata.get("pow_diagnostics")
+        if pow_diagnostics is not None:
+            kernel_stats = decode_pow_diagnostics(pow_diagnostics)
+            self._kernel_hash_records += 1
+            target_log2 = metadata.get("target_log2")
+            best_log2 = kernel_stats.get("kernel_best_hash_log2")
+            if target_log2 is not None and best_log2 is not None:
+                margin = best_log2 - target_log2
+                if (
+                    margin >= 0
+                    and (
+                        self._kernel_best_margin_log2 is None
+                        or margin < self._kernel_best_margin_log2
+                    )
+                ):
+                    self._kernel_best_margin_log2 = margin
+
         if self.diagnostics is None:
             return
         self.diagnostics.record(
             template_height=metadata.get("template_height"),
             template_hash_prefix=metadata.get("template_hash_prefix"),
             target_log2=metadata.get("target_log2"),
-            best_observed_hash_log2=None,
+            best_observed_hash_log2=(
+                kernel_stats.get("kernel_best_hash_log2")
+                if kernel_stats is not None
+                else None
+            ),
+            kernel_hash_attempts=(
+                kernel_stats.get("kernel_hash_attempts")
+                if kernel_stats is not None
+                else None
+            ),
+            kernel_best_hash_hex=(
+                kernel_stats.get("kernel_best_hash_hex")
+                if kernel_stats is not None
+                else None
+            ),
+            kernel_best_tile_coord=(
+                kernel_stats.get("kernel_best_tile_coord")
+                if kernel_stats is not None
+                else None
+            ),
+            kernel_best_thread_idx=(
+                kernel_stats.get("kernel_best_thread_idx")
+                if kernel_stats is not None
+                else None
+            ),
             block_found=None,
             b_cache_hit=metadata.get("b_cache_hit"),
         )
@@ -337,6 +394,7 @@ class DirectMiner:
         callback_meta = dict(meta)
         callback_meta["b_cache_hit"] = None
         callback_meta["slot_idx"] = slot_idx
+        callback_meta["pow_diagnostics"] = slot.pow_diagnostics
 
         # Bind slot_idx into a release callable. Default-arg captures
         # by value so each lambda owns its own slot_idx — closing over
@@ -364,6 +422,7 @@ class DirectMiner:
                 kernel_cluster_size_n=self.config.kernel_cluster_size_n,
                 kernel_pipeline_stages=self.config.kernel_pipeline_stages,
                 kernel_mma_registers=self.config.kernel_mma_registers,
+                pow_diagnostics=slot.pow_diagnostics,
             )
         except UnsafeSlotReleaseError:
             # Cleanup couldn't prove the GPU is idle, so the slot was
@@ -463,6 +522,13 @@ class DirectMiner:
                     f"[BCACHE] hit_rate={hit_rate:.1f}% "
                     f"({hits} hits, {misses} misses)"
                 )
+
+        if self._kernel_best_margin_log2 is not None:
+            logger.info(
+                f"[KERNEL HASH] best_margin_log2="
+                f"{self._kernel_best_margin_log2:.2f} "
+                f"records={self._kernel_hash_records}"
+            )
 
         self._last_log_time = now
         self._last_completed_count = completed

@@ -78,10 +78,53 @@ worth adding production config surface.
 Further meaningful gains likely require kernel code changes rather than launch
 flags. Best next candidates:
 
-- Expose best-hash observability in the kernel so improvements can be evaluated
-  without waiting for actual chain wins.
+- Use opt-in kernel best-hash observability when evaluating future kernel
+  changes. This is implemented behind `--enable-kernel-hash-stats` and should be
+  paired with `--enable-diagnostics` when JSONL output is needed. Keep it off in
+  production because it adds atomics to the PoW hot path.
 - Reduce mining epilogue/hash overhead inside the mine kernel.
 - Investigate persistent or fused direct-mining kernels to reduce per-launch and
   per-tile setup costs.
 - Design a proof-compatible non-256 `tile_n` path only if the proof row/column
   extraction logic is updated and validated first.
+
+## Opt-In Kernel Hash Observability
+
+The direct miner now has an opt-in CUDA-side diagnostics buffer for benchmark
+runs:
+
+```bash
+--enable-kernel-hash-stats --enable-diagnostics
+```
+
+When enabled, each mining kernel call writes a tiny per-slot `uint32` diagnostics
+buffer containing:
+
+- number of kernel hash attempts observed by that call
+- selected best hash, chosen by lowest most-significant 32-bit word
+- tile coordinate and thread index that produced the selected hash
+
+The direct miner decodes this after the CUDA completion event and writes these
+JSONL fields:
+
+```text
+kernel_hash_attempts
+kernel_best_hash_hex
+kernel_best_tile_coord
+kernel_best_thread_idx
+best_observed_hash_log2
+margin_log2
+```
+
+This is benchmark observability only. It does not change proof generation,
+gateway submission, or the host signal winner path. The default remains disabled
+so production mining keeps the same hot path and avoids the extra atomics.
+
+Validation on the H100 pod:
+
+- `pearl-gemm` rebuilt successfully with `MAX_JOBS=4`.
+- `get_pow_diagnostics_size()` returned `16` `uint32` words.
+- A 70-second smoke run with `m=1024 n=8192 k=8192`, B-cache, headless kernel,
+  and kernel hash stats produced 84 JSONL records.
+- Each smoke record reported `kernel_hash_attempts=65536`, matching
+  `outer_tiles_per_matmul=256` × `256` MMA consumer threads.
