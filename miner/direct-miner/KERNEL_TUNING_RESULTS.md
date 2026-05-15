@@ -233,6 +233,57 @@ increases code size/register pressure enough to offset the skipped digest-word
 stores and comparison loop. The experiment was reverted and the pod was rebuilt
 back to the known-good production kernel.
 
+### 2026-05-15 Runtime Swizzle Sweep
+
+Pod artifact:
+
+```text
+/workspace/sweeps/swizzle-k16384-20260515-220944/summary.csv
+```
+
+The direct miner now exposes the kernel scheduler swizzle for benchmark runs:
+
+```bash
+--kernel-swizzle N
+--kernel-swizzle-m-major
+```
+
+This is a runtime kernel parameter, so no CUDA rebuild is needed. Production
+still leaves it unset so `pearl-gemm` uses its L2 heuristic.
+
+Sweep settings:
+
+```text
+m=8192 n=261888 k=16384
+max_in_flight=4
+B-cache enabled
+headless kernel enabled
+kernel=128x256x128 stages=3 cluster=2x1
+```
+
+Results:
+
+| Cell | Axis | Normalized attempts/s | Chance-weighted rate | Decision |
+|---|---|---:|---:|---|
+| explicit swizzle 8 | N-major | 1,296,932 | 21,248,937,905 | no production change |
+| heuristic | N-major | 1,295,396 | 21,223,770,664 | production |
+| explicit swizzle 12 | N-major | 1,290,141 | 21,137,664,901 | reject |
+| explicit swizzle 16 | M-major | 1,289,590 | 21,128,640,179 | reject |
+| explicit swizzle 16 | N-major | 1,281,961 | 21,003,645,252 | reject |
+| explicit swizzle 8 | M-major | 1,279,070 | 20,956,282,907 | reject |
+| explicit swizzle 4 | N-major | 1,276,675 | 20,917,045,813 | reject |
+| explicit swizzle 32 | M-major | 1,274,175 | 20,876,079,951 | reject |
+| explicit swizzle 24 | N-major | 1,255,000 | 20,561,926,945 | reject |
+| explicit swizzle 32 | N-major | 1,220,842 | 20,002,273,835 | reject |
+| explicit swizzle 128 | N-major | 997,351 | 16,340,599,488 | reject |
+| explicit swizzle 64 | N-major | 995,131 | 16,304,222,250 | reject |
+
+Conclusion: the existing heuristic is effectively optimal for the current
+shape. Explicit `--kernel-swizzle 8` was only +0.12% in a short run, inside
+normal measurement noise and consistent with the heuristic already choosing 8
+for `k=16384`, `tile_n=256` on H100. Keep the override for future sweeps, but
+do not set it in production scripts.
+
 ### Rejected: Final WGMMA Wait Elision
 
 Experiment: have `TileHashAccumulator::accumulate()` report whether it already

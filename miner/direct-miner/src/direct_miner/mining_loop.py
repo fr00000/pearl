@@ -226,7 +226,10 @@ class DirectMiner:
             f"cluster={self.config.kernel_cluster_size_m}x"
             f"{self.config.kernel_cluster_size_n} "
             f"stages={self.config.kernel_pipeline_stages or 'default'} "
-            f"mma_registers={self.config.kernel_mma_registers or 'default'}"
+            f"mma_registers={self.config.kernel_mma_registers or 'default'} "
+            f"swizzle={self.config.kernel_swizzle or 'heuristic'} "
+            f"swizzle_axis="
+            f"{'n' if self.config.kernel_swizzle_n_maj else 'm'}"
         )
 
     def run(self) -> None:
@@ -443,6 +446,8 @@ class DirectMiner:
                 kernel_cluster_size_n=self.config.kernel_cluster_size_n,
                 kernel_pipeline_stages=self.config.kernel_pipeline_stages,
                 kernel_mma_registers=self.config.kernel_mma_registers,
+                kernel_swizzle=self.config.kernel_swizzle,
+                kernel_swizzle_n_maj=self.config.kernel_swizzle_n_maj,
                 pow_diagnostics=slot.pow_diagnostics,
             )
         except UnsafeSlotReleaseError:

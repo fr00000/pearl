@@ -95,6 +95,8 @@ class MinerConfig:
     kernel_cluster_size_n: int = 1
     kernel_pipeline_stages: int | None = None
     kernel_mma_registers: int | None = None
+    kernel_swizzle: int | None = None
+    kernel_swizzle_n_maj: bool = True
 
 
 DEFAULT_CONFIG: Final = MinerConfig()

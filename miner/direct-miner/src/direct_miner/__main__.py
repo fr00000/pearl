@@ -96,6 +96,16 @@ def main():
         help="explicit MMA warpgroup register allocation; default uses "
              "the kernel heuristic"
     )
+    parser.add_argument(
+        "--kernel-swizzle", type=int, default=None,
+        help="override the mining kernel CTA scheduler swizzle; default "
+             "uses the pearl-gemm L2 heuristic"
+    )
+    parser.add_argument(
+        "--kernel-swizzle-m-major", action="store_true",
+        help="schedule swizzle groups in M-major order instead of the "
+             "default N-major order"
+    )
     args = parser.parse_args()
 
     setup_logging(args.log_level)
@@ -118,6 +128,8 @@ def main():
         kernel_cluster_size_n=args.kernel_cluster_n,
         kernel_pipeline_stages=args.kernel_stages,
         kernel_mma_registers=args.kernel_mma_registers,
+        kernel_swizzle=args.kernel_swizzle,
+        kernel_swizzle_n_maj=not args.kernel_swizzle_m_major,
     )
 
     miner = DirectMiner(config)
