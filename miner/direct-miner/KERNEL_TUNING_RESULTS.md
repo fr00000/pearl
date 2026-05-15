@@ -88,6 +88,38 @@ flags. Best next candidates:
 - Design a proof-compatible non-256 `tile_n` path only if the proof row/column
   extraction logic is updated and validated first.
 
+### Rejected: Final WGMMA Wait Elision
+
+Experiment: have `TileHashAccumulator::accumulate()` report whether it already
+performed `warpgroup_wait<0>()` on the final `k_block`, then skip the
+unconditional post-loop wait in `CollectiveMainloop::mma()` when that happened.
+
+Rationale: for the production `128x256x128` kernel, the final hash accumulation
+already waits for the final WGMMA group before reading `tCrC`, so the
+post-loop wait looked redundant.
+
+Benchmark on the H100 pod with the production shape and settings:
+
+```text
+m=8192 n=524032 k=8192
+max_in_flight=4
+B-cache enabled
+headless kernel enabled
+kernel=128x256x128 stages=3 cluster=2x1
+```
+
+Results:
+
+| Variant | Normalized attempts/s | Delta vs 2,504,835/s reference | Decision |
+|---|---:|---:|---|
+| wait elision run 1 | 2,495,833 | -0.36% | reject |
+| wait elision run 2 | 2,491,354 | -0.54% | reject |
+
+Conclusion: the final wait is not a useful speed target. Either it was already
+hidden by scheduling, or the extra branch/control state costs more than the wait
+saves. The experiment was reverted and the pod was rebuilt back to the
+known-good production kernel.
+
 ## Opt-In Kernel Hash Observability
 
 The direct miner now has an opt-in CUDA-side diagnostics buffer for benchmark
