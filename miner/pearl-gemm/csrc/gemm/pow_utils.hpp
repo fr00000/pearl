@@ -202,7 +202,8 @@ struct TileHashAccumulator {
 
 /// Compress transcript using BLAKE3 and check against PoW target.
 /// Returns true if hash <= target (block found).
-template <typename TranscriptTensor, typename BlockCoord>
+template <bool EnablePowDiagnostics, typename TranscriptTensor,
+          typename BlockCoord>
 CUTLASS_DEVICE bool check_pow_target(const TranscriptTensor& transcript,
                                      const uint32_t* pow_target,
                                      const uint32_t* pow_key,
@@ -218,7 +219,7 @@ CUTLASS_DEVICE bool check_pow_target(const TranscriptTensor& transcript,
   blake3::compress_msg_block_u32(transcript, hash,
                                  blake3::COMPRESS_PARAMS_SINGLE_BLOCK_KEYED);
 
-  if (pow_diagnostics != nullptr) {
+  if constexpr (EnablePowDiagnostics) {
     cute::array<uint32_t, blake3::CHAINING_VALUE_SIZE_U32> hash_words;
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < blake3::CHAINING_VALUE_SIZE_U32; ++i) {

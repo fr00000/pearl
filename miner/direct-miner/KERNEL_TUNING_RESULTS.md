@@ -128,3 +128,43 @@ Validation on the H100 pod:
   and kernel hash stats produced 84 JSONL records.
 - Each smoke record reported `kernel_hash_attempts=65536`, matching
   `outer_tiles_per_matmul=256` × `256` MMA consumer threads.
+
+## 2026-05-15 Disabled-Path Regression Check
+
+The first observability implementation left a runtime `pow_diagnostics !=
+nullptr` branch inside the PoW hot path. With kernel hash stats disabled, two
+short production runs measured about `2.447M-2.451M` normalized attempts/s,
+roughly 2.3% below the pre-observability reference (`2,506,384/s`).
+
+The fix makes PoW diagnostics a compile-time kernel trait:
+
+- `EnablePowDiagnostics=false` is instantiated for production.
+- `EnablePowDiagnostics=true` is selected only when a diagnostics buffer is
+  passed.
+- The diagnostic hash-copy/atomic path is guarded by `if constexpr`, so the
+  disabled production kernel does not carry the diagnostic update body.
+
+Validation build:
+
+```bash
+MAX_JOBS=4 \
+PEARL_GEMM_DISABLE_DEBUG_MODE=TRUE \
+PEARL_GEMM_FORCE_BUILD=TRUE \
+uv pip install --no-build-isolation -e miner/pearl-gemm
+```
+
+`PEARL_GEMM_DISABLE_DEBUG_MODE=TRUE` was used only to shorten the benchmark
+build; production and kernel-hash observability both use `EnableDebug=false`.
+
+Results on the H100 pod:
+
+| Check | Result |
+|---|---:|
+| `get_pow_diagnostics_size()` | 16 `uint32` words |
+| hash-observability smoke records | 164 matmul records plus session end |
+| smoke `kernel_hash_attempts` | 65,536 per matmul |
+| production disabled-stat run | 1,985 matmuls in 103.8s |
+| production normalized attempts/s | 2,504,835 |
+
+Conclusion: the compile-time split recovers the disabled-path regression within
+measurement noise of the original production reference.

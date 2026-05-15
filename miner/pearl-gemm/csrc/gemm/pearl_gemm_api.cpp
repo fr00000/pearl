@@ -613,7 +613,7 @@ void gemm(at::Tensor& A,         // m x k
         bM, bN, bK, R, pipeline_stages, cM, cN, 0, kernel_found = true;
         run_pearl_gemm_<ElementOut, R_, bM_, bN_, bK_, stages_, cM_, cN_,
                         mma_registers_, SkipReduction, SkipDenoising,
-                        EnableDebug>(params, stream);
+                        EnableDebug, false>(params, stream);
         goto done;);
   }
 
@@ -945,27 +945,32 @@ void noisy_gemm(
         }
       }
 
-      if (mine_only) {
-        TORCH_CHECK(!skip_reduction,
-                    "mine_only headless kernel requires skip_reduction=False");
-        MATMUL_CONFIG_SWITCH(
-            bM, bN, bK, r, pipeline_stages, cM, cN, mma_registers,
-            kernel_found_matmul = true;
-            run_pearl_mine_<ElementOut, R_, bM_, bN_, bK_, stages_, cM_, cN_,
-                            mma_registers_, EnableDebug>(params, stream););
-      } else {
-        SKIP_REDUCTION_SWITCH(
-            skip_reduction, SkipReduction,
-            SKIP_DENOISING_SWITCH(
-                effective_skip_denoising, SkipDenoising,
-                MATMUL_CONFIG_SWITCH(
-                    bM, bN, bK, r, pipeline_stages, cM, cN, mma_registers,
-                    kernel_found_matmul = true;
-                    run_pearl_gemm_<ElementOut, R_, bM_, bN_, bK_, stages_,
-                                    cM_, cN_, mma_registers_, SkipReduction,
-                                    SkipDenoising, EnableDebug, false>(
-                        params, stream););););
-      });
+      BOOL_SWITCH(
+          params.pow_diagnostics != nullptr, EnablePowDiagnostics,
+          if (mine_only) {
+            TORCH_CHECK(!skip_reduction,
+                        "mine_only headless kernel requires skip_reduction=False");
+            MATMUL_CONFIG_SWITCH(
+                bM, bN, bK, r, pipeline_stages, cM, cN, mma_registers,
+                kernel_found_matmul = true;
+                run_pearl_mine_<ElementOut, R_, bM_, bN_, bK_, stages_, cM_,
+                                cN_, mma_registers_, EnableDebug,
+                                EnablePowDiagnostics>(params, stream););
+          } else {
+            SKIP_REDUCTION_SWITCH(
+                skip_reduction, SkipReduction,
+                SKIP_DENOISING_SWITCH(
+                    effective_skip_denoising, SkipDenoising,
+                    MATMUL_CONFIG_SWITCH(
+                        bM, bN, bK, r, pipeline_stages, cM, cN, mma_registers,
+                        kernel_found_matmul = true;
+                        run_pearl_gemm_<ElementOut, R_, bM_, bN_, bK_, stages_,
+                                        cM_, cN_, mma_registers_, SkipReduction,
+                                        SkipDenoising, EnableDebug,
+                                        EnablePowDiagnostics, false>(
+                            params, stream););););
+          });
+      );
 
   TORCH_CHECK(kernel_found_matmul,
               "No noisy_gemm kernel found with given config: ", "bM = ", bM,

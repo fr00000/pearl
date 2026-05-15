@@ -689,3 +689,31 @@ Validation:
   JSONL records.
 - Each record reported `kernel_hash_attempts=65536`, matching the expected
   `256` outer tiles × `256` MMA consumer threads for that smoke shape.
+
+Follow-up disabled-path check:
+
+- The initial observability version measured `2.447M-2.451M` normalized
+  attempts/s with kernel stats disabled, about 2.3% below the pre-observability
+  `2,506,384/s` reference.
+- Moved diagnostics selection into the kernel template as
+  `EnablePowDiagnostics`; production instantiates `false`, and the diagnostics
+  write path is guarded by `if constexpr`.
+- Rebuilt on the H100 pod with:
+
+```bash
+MAX_JOBS=4 \
+PEARL_GEMM_DISABLE_DEBUG_MODE=TRUE \
+PEARL_GEMM_FORCE_BUILD=TRUE \
+uv pip install --no-build-isolation -e miner/pearl-gemm
+```
+
+- Re-ran the hash smoke with a clean SIGINT drain. It wrote 164 matmul records
+  plus session end, each with `kernel_hash_attempts=65536`.
+- Re-ran production mode with kernel hash stats and JSON diagnostics disabled:
+  `m=8192 n=524032 k=8192`, B-cache, headless, `max_in_flight=4`,
+  `128x256x128`, `stages=3`, `cluster=2x1`.
+- Final production-disabled result: 1,985 completed matmuls in 103.8s,
+  `normalized_attempt_rate=2,504,835/s`.
+
+Conclusion: compile-time diagnostics recover the disabled-path regression to
+within measurement noise of the original production reference.
