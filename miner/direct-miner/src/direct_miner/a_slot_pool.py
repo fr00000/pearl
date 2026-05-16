@@ -51,6 +51,7 @@ class ASlot:
 
     C: Optional[torch.Tensor]             # (m, n) bf16 output; None for headless
     host_signal_sync: torch.Tensor        # (host_signal_sync_size,) int8
+    pow_diagnostics: Optional[torch.Tensor]  # uint32 kernel hash stats
     tensor_hash_scratchpad: torch.Tensor  # uint8
 
 
@@ -76,6 +77,7 @@ class ASlotPool:
         noise_rank: int,
         host_signal_sync_size: int,
         scratchpad_bytes: int,
+        pow_diagnostics_size: int | None = None,
         device: torch.device | str = "cuda",
         out_dtype: torch.dtype = torch.bfloat16,
         allocate_c: bool = True,
@@ -106,6 +108,15 @@ class ASlotPool:
                 ),
                 host_signal_sync=torch.zeros(
                     (host_signal_sync_size,), dtype=torch.int8, device=device
+                ),
+                pow_diagnostics=(
+                    torch.empty(
+                        (pow_diagnostics_size,),
+                        dtype=torch.uint32,
+                        device=device,
+                    )
+                    if pow_diagnostics_size is not None
+                    else None
                 ),
                 tensor_hash_scratchpad=torch.empty(
                     scratchpad_bytes, dtype=torch.uint8, device=device
@@ -138,6 +149,7 @@ class ASlotPool:
             + m * noise_rank * 2                    # A_E_BL fp16
             + (m * n * 2 if allocate_c else 0)      # C bf16
             + host_signal_sync_size                 # sync int8
+            + ((pow_diagnostics_size or 0) * 4)      # diagnostics uint32
             + scratchpad_bytes                      # scratchpad uint8
         )
         total_mb = per_slot_bytes * num_slots / 1024 / 1024

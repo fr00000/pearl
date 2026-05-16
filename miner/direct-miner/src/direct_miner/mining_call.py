@@ -220,6 +220,9 @@ def pearl_gemm_noisy_phase_c(
     kernel_cluster_size_n: int = 1,
     kernel_pipeline_stages: int | None = None,
     kernel_mma_registers: int | None = None,
+    kernel_swizzle: int | None = None,
+    kernel_swizzle_n_maj: bool = True,
+    pow_diagnostics: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor | None, bool, torch.cuda.Event]:
     """Phase C multi-stream cached call.
 
@@ -439,6 +442,9 @@ def pearl_gemm_noisy_phase_c(
             # Slot's host_signal_sync is reused across iterations; reset
             # before the kernel reads it.
             slot.host_signal_sync.zero_()
+            if pow_diagnostics is not None:
+                pow_diagnostics.zero_()
+                pow_diagnostics[1:2].fill_(torch.iinfo(torch.uint32).max)
 
             if mine_only:
                 headless_mine(
@@ -467,8 +473,11 @@ def pearl_gemm_noisy_phase_c(
                     cluster_size_n=kernel_cluster_size_n,
                     pipeline_stages=kernel_pipeline_stages,
                     mma_registers=kernel_mma_registers,
+                    swizzle=kernel_swizzle,
+                    swizzle_n_maj=kernel_swizzle_n_maj,
                     run_noising_A=True,
                     run_noising_B=run_noising_B,
+                    pow_diagnostics=pow_diagnostics,
                 )
             else:
                 if slot.C is None:
@@ -502,10 +511,13 @@ def pearl_gemm_noisy_phase_c(
                     cluster_size_n=kernel_cluster_size_n,
                     pipeline_stages=kernel_pipeline_stages,
                     mma_registers=kernel_mma_registers,
+                    swizzle=kernel_swizzle,
+                    swizzle_n_maj=kernel_swizzle_n_maj,
                     run_noising_A=True,
                     run_noising_B=run_noising_B,
                     skip_reduction=False,
                     skip_denoising=False,
+                    pow_diagnostics=pow_diagnostics,
                 )
 
         completion_event = torch.cuda.Event()

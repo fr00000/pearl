@@ -9,8 +9,8 @@ source "${REPO_DIR}/env.sh"
 
 # === Latest measured direct-mining defaults; see H100_SXM_VERIFY.md ===
 SHAPE_M="${SHAPE_M:-8192}"
-SHAPE_N="${SHAPE_N:-524032}"
-SHAPE_K="${SHAPE_K:-8192}"
+SHAPE_N="${SHAPE_N:-261888}"
+SHAPE_K="${SHAPE_K:-16384}"
 MAX_IN_FLIGHT="${MAX_IN_FLIGHT:-4}"
 KERNEL_TILE_M="${KERNEL_TILE_M:-128}"
 KERNEL_TILE_N="${KERNEL_TILE_N:-256}"

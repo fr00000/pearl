@@ -17,6 +17,7 @@ template <typename ElementIn_, typename ElementOut_, typename ElementDenoise_,
           typename ElementScale_, typename TileShape_MNKR_, bool Is_Even_M_,
           bool Is_Even_N_, int cM_, int cN_, bool SkipReduction_,
           bool SkipDenoising_, int kStages_, bool EnableDebug_,
+          bool EnablePowDiagnostics_,
           int MmaRegisters_,
           bool MineOnly_ = false>
 struct KernelTraits {
@@ -38,6 +39,7 @@ struct KernelTraits {
   static constexpr bool MineOnly = MineOnly_;
   static constexpr int kStages = kStages_;
   static constexpr bool EnableDebug = EnableDebug_;
+  static constexpr bool EnablePowDiagnostics = EnablePowDiagnostics_;
   static constexpr int MmaRegistersRequested = MmaRegisters_;
   static constexpr int srcLane = 0;
 

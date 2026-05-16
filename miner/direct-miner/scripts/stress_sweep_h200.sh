@@ -38,7 +38,7 @@ if [[ $NUM_GPUS -lt 1 ]]; then
     exit 1
 fi
 
-echo "cell_id,m,n,k,max_in_flight,gpu_idx,duration_s,total_matmuls,completion_rate_mm_s,tile_rate_per_s,peak_mem_mib,errors,notes" > "$SUMMARY"
+echo "cell_id,m,n,k,max_in_flight,gpu_idx,duration_s,total_matmuls,completion_rate_mm_s,raw_outer_tile_rate_per_s,normalized_attempt_rate_per_s,peak_mem_mib,errors,notes" > "$SUMMARY"
 
 # Cell definitions: id|m|n|k|mif
 declare -a CELLS=(
@@ -196,7 +196,7 @@ for cell in "${CELLS_TO_RUN[@]}"; do
         elif grep -qi "sanity" "$log" 2>/dev/null; then
             notes="sanity_check"
         fi
-        echo "${cell_id},${m},${n},${k},${mif},${gpu_idx},${DURATION_S},,,,${peak_mem},${errors},${notes}" >> "$SUMMARY"
+        echo "${cell_id},${m},${n},${k},${mif},${gpu_idx},${DURATION_S},,,,,${peak_mem},${errors},${notes}" >> "$SUMMARY"
         echo "  ${cell_id}: ${notes} (peak ${peak_mem} MiB, gpu ${gpu_idx})"
         continue
     fi
@@ -204,16 +204,17 @@ for cell in "${CELLS_TO_RUN[@]}"; do
     completed=$(echo "$final_line" | grep -oP "completed=\K[0-9]+")
     elapsed=$(echo "$final_line" | grep -oP "elapsed=\K[0-9.]+")
     comp_rate=$(echo "$final_line" | grep -oP "completion_rate=\K[0-9.]+")
-    tile_rate=$(echo "$final_line" | grep -oP "tile_rate=\K[0-9]+")
+    raw_outer_tile_rate=$(echo "$final_line" | grep -oP "raw_outer_tile_rate=\K[0-9]+")
+    normalized_attempt_rate=$(echo "$final_line" | grep -oP "normalized_attempt_rate=\K[0-9]+")
 
-    echo "${cell_id},${m},${n},${k},${mif},${gpu_idx},${elapsed},${completed},${comp_rate},${tile_rate},${peak_mem},${errors}," >> "$SUMMARY"
-    echo "  ${cell_id}: ${tile_rate} tiles/s (${comp_rate} mm/s), peak ${peak_mem} MiB, gpu ${gpu_idx}, errors=${errors}"
+    echo "${cell_id},${m},${n},${k},${mif},${gpu_idx},${elapsed},${completed},${comp_rate},${raw_outer_tile_rate},${normalized_attempt_rate},${peak_mem},${errors}," >> "$SUMMARY"
+    echo "  ${cell_id}: ${normalized_attempt_rate} attempts/s (${raw_outer_tile_rate} raw outer tiles/s, ${comp_rate} mm/s), peak ${peak_mem} MiB, gpu ${gpu_idx}, errors=${errors}"
 done
 
-# Sort by tile rate for readability
+# Sort by normalized attempt rate for readability
 {
     head -1 "$SUMMARY"
-    tail -n +2 "$SUMMARY" | sort -t, -k10 -n -r
+    tail -n +2 "$SUMMARY" | sort -t, -k11 -n -r
 } > "$SUMMARY.sorted"
 mv "$SUMMARY.sorted" "$SUMMARY"
 

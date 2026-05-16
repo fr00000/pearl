@@ -2,7 +2,6 @@
 multi-stream A-side overlap."""
 
 import logging
-import math
 import time
 from typing import Optional
 
@@ -12,6 +11,7 @@ from miner_base.commitment_hash import CommitmentHasher
 from miner_base.gpu_matmul_config import GPUMatmulConfigFactory
 from pearl_gemm import (
     get_host_signal_sync_size,
+    get_pow_diagnostics_size,
     get_required_scratchpad_bytes,
 )
 from vllm_miner.mining_state import (
@@ -21,10 +21,22 @@ from vllm_miner.mining_state import (
 )
 
 from .a_slot_pool import ASlotPool, SlotAcquireTimeout
+from .attempt_metrics import (
+    chance_weighted_attempts_per_matmul,
+    mma_consumer_threads_per_cta,
+    normalized_attempts_per_matmul,
+    normalized_attempt_scale,
+    outer_tiles_per_matmul,
+    rounded_common_dim,
+)
 from .b_cache import BSideCache
 from .completion_tracker import CompletionTracker
 from .config import MinerConfig
-from .diagnostics import DiagnosticsCollector, target_to_log2
+from .diagnostics import (
+    DiagnosticsCollector,
+    decode_pow_diagnostics,
+    target_to_log2,
+)
 from .mining_call import UnsafeSlotReleaseError, pearl_gemm_noisy_phase_c
 from .synthetic_data import FixedBPool
 
@@ -55,6 +67,7 @@ class DirectMiner:
                 flush_every_n=100,
                 phase_tag=config.phase_tag,
             )
+        if config.enable_diagnostics or config.enable_kernel_hash_stats:
             on_complete = self._on_matmul_complete
         else:
             on_complete = None
@@ -75,10 +88,28 @@ class DirectMiner:
         self.stream_prep: Optional[torch.cuda.Stream] = None
         self.a_pool: Optional[ASlotPool] = None
 
-        self._outer_tiles_per_matmul = (
-            math.ceil(config.shapes.m / config.kernel_tile_size_m) *
-            math.ceil(config.shapes.n / config.kernel_tile_size_n)
+        self._outer_tiles_per_matmul = outer_tiles_per_matmul(
+            m=config.shapes.m,
+            n=config.shapes.n,
+            tile_m=config.kernel_tile_size_m,
+            tile_n=config.kernel_tile_size_n,
         )
+        self._attempt_scale = normalized_attempt_scale(
+            tile_m=config.kernel_tile_size_m
+        )
+        self._mma_threads_per_cta = mma_consumer_threads_per_cta(
+            tile_m=config.kernel_tile_size_m
+        )
+        self._normalized_attempts_per_matmul = (
+            normalized_attempts_per_matmul(
+                m=config.shapes.m,
+                n=config.shapes.n,
+                tile_m=config.kernel_tile_size_m,
+                tile_n=config.kernel_tile_size_n,
+            )
+        )
+        self._rounded_common_dim = 0
+        self._chance_weighted_attempts_per_matmul = 0.0
 
         self._start_time: float = 0.0
         self._last_log_time: float = 0.0
@@ -87,6 +118,8 @@ class DirectMiner:
         self._launch_count: int = 0
 
         self._matmul_config = None  # built in initialize()
+        self._kernel_best_margin_log2: float | None = None
+        self._kernel_hash_records: int = 0
 
         # Per-template diagnostic metadata cache.
         self._meta_cache_header_bytes: bytes | None = None
@@ -124,6 +157,20 @@ class DirectMiner:
         torch.cuda.synchronize()
 
         settings = get_async_manager()._conf
+        self._rounded_common_dim = rounded_common_dim(
+            k=self.config.shapes.k,
+            rank=settings.noise_rank,
+        )
+        self._chance_weighted_attempts_per_matmul = (
+            chance_weighted_attempts_per_matmul(
+                m=self.config.shapes.m,
+                n=self.config.shapes.n,
+                k=self.config.shapes.k,
+                rank=settings.noise_rank,
+                tile_m=self.config.kernel_tile_size_m,
+                tile_n=self.config.kernel_tile_size_n,
+            )
+        )
         self._matmul_config = GPUMatmulConfigFactory.create(
             k=self.config.shapes.k, noise_rank=settings.noise_rank
         )
@@ -143,6 +190,11 @@ class DirectMiner:
                 self.config.shapes.n * self.config.shapes.k)
         )
         host_signal_sync_size = get_host_signal_sync_size()
+        pow_diagnostics_size = (
+            get_pow_diagnostics_size()
+            if self.config.enable_kernel_hash_stats
+            else None
+        )
         self.a_pool = ASlotPool(
             num_slots=self.config.max_in_flight,
             m=self.config.shapes.m,
@@ -151,21 +203,33 @@ class DirectMiner:
             noise_rank=settings.noise_rank,
             host_signal_sync_size=host_signal_sync_size,
             scratchpad_bytes=scratchpad_bytes,
+            pow_diagnostics_size=pow_diagnostics_size,
             allocate_c=not self.config.enable_headless_kernel,
         )
 
         logger.info(
             f"Direct miner initialized. "
             f"outer_tiles_per_matmul={self._outer_tiles_per_matmul} "
+            f"mma_threads_per_cta={self._mma_threads_per_cta} "
+            f"attempt_scale={self._attempt_scale:.3f} "
+            f"normalized_attempts_per_matmul="
+            f"{self._normalized_attempts_per_matmul:.1f} "
+            f"rounded_common_dim={self._rounded_common_dim} "
+            f"chance_weighted_attempts_per_matmul="
+            f"{self._chance_weighted_attempts_per_matmul:.1f} "
             f"max_in_flight={self.config.max_in_flight} "
             f"headless_kernel={self.config.enable_headless_kernel} "
+            f"kernel_hash_stats={self.config.enable_kernel_hash_stats} "
             f"kernel={self.config.kernel_tile_size_m}x"
             f"{self.config.kernel_tile_size_n}x"
             f"{self.config.kernel_tile_size_k} "
             f"cluster={self.config.kernel_cluster_size_m}x"
             f"{self.config.kernel_cluster_size_n} "
             f"stages={self.config.kernel_pipeline_stages or 'default'} "
-            f"mma_registers={self.config.kernel_mma_registers or 'default'}"
+            f"mma_registers={self.config.kernel_mma_registers or 'default'} "
+            f"swizzle={self.config.kernel_swizzle or 'heuristic'} "
+            f"swizzle_axis="
+            f"{'n' if self.config.kernel_swizzle_n_maj else 'm'}"
         )
 
     def run(self) -> None:
@@ -270,13 +334,55 @@ class DirectMiner:
         }
 
     def _on_matmul_complete(self, metadata: dict) -> None:
+        kernel_stats = None
+        pow_diagnostics = metadata.get("pow_diagnostics")
+        if pow_diagnostics is not None:
+            kernel_stats = decode_pow_diagnostics(pow_diagnostics)
+            self._kernel_hash_records += 1
+            target_log2 = metadata.get("target_log2")
+            best_log2 = kernel_stats.get("kernel_best_hash_log2")
+            if target_log2 is not None and best_log2 is not None:
+                margin = best_log2 - target_log2
+                if (
+                    margin >= 0
+                    and (
+                        self._kernel_best_margin_log2 is None
+                        or margin < self._kernel_best_margin_log2
+                    )
+                ):
+                    self._kernel_best_margin_log2 = margin
+
         if self.diagnostics is None:
             return
         self.diagnostics.record(
             template_height=metadata.get("template_height"),
             template_hash_prefix=metadata.get("template_hash_prefix"),
             target_log2=metadata.get("target_log2"),
-            best_observed_hash_log2=None,
+            best_observed_hash_log2=(
+                kernel_stats.get("kernel_best_hash_log2")
+                if kernel_stats is not None
+                else None
+            ),
+            kernel_hash_attempts=(
+                kernel_stats.get("kernel_hash_attempts")
+                if kernel_stats is not None
+                else None
+            ),
+            kernel_best_hash_hex=(
+                kernel_stats.get("kernel_best_hash_hex")
+                if kernel_stats is not None
+                else None
+            ),
+            kernel_best_tile_coord=(
+                kernel_stats.get("kernel_best_tile_coord")
+                if kernel_stats is not None
+                else None
+            ),
+            kernel_best_thread_idx=(
+                kernel_stats.get("kernel_best_thread_idx")
+                if kernel_stats is not None
+                else None
+            ),
             block_found=None,
             b_cache_hit=metadata.get("b_cache_hit"),
         )
@@ -312,6 +418,7 @@ class DirectMiner:
         callback_meta = dict(meta)
         callback_meta["b_cache_hit"] = None
         callback_meta["slot_idx"] = slot_idx
+        callback_meta["pow_diagnostics"] = slot.pow_diagnostics
 
         # Bind slot_idx into a release callable. Default-arg captures
         # by value so each lambda owns its own slot_idx — closing over
@@ -339,6 +446,9 @@ class DirectMiner:
                 kernel_cluster_size_n=self.config.kernel_cluster_size_n,
                 kernel_pipeline_stages=self.config.kernel_pipeline_stages,
                 kernel_mma_registers=self.config.kernel_mma_registers,
+                kernel_swizzle=self.config.kernel_swizzle,
+                kernel_swizzle_n_maj=self.config.kernel_swizzle_n_maj,
+                pow_diagnostics=slot.pow_diagnostics,
             )
         except UnsafeSlotReleaseError:
             # Cleanup couldn't prove the GPU is idle, so the slot was
@@ -397,17 +507,36 @@ class DirectMiner:
             launched_delta / elapsed_interval if elapsed_interval > 0 else 0
         )
 
-        instant_tile_rate = instant_completion_rate * self._outer_tiles_per_matmul
-        cumulative_tile_rate = (
+        instant_outer_tile_rate = (
+            instant_completion_rate * self._outer_tiles_per_matmul
+        )
+        cumulative_outer_tile_rate = (
             cumulative_completion_rate * self._outer_tiles_per_matmul
+        )
+        instant_attempt_rate = (
+            instant_completion_rate * self._normalized_attempts_per_matmul
+        )
+        cumulative_attempt_rate = (
+            cumulative_completion_rate * self._normalized_attempts_per_matmul
+        )
+        instant_chance_weighted_rate = (
+            instant_completion_rate * self._chance_weighted_attempts_per_matmul
+        )
+        cumulative_chance_weighted_rate = (
+            cumulative_completion_rate
+            * self._chance_weighted_attempts_per_matmul
         )
 
         logger.info(
             f"[DIRECT MINER] completed={completed} "
             f"({cumulative_completion_rate:.1f}/s avg, "
             f"{instant_completion_rate:.1f}/s now) "
-            f"tiles=({cumulative_tile_rate:.0f}/s avg, "
-            f"{instant_tile_rate:.0f}/s now) "
+            f"outer_tiles=({cumulative_outer_tile_rate:.0f}/s avg, "
+            f"{instant_outer_tile_rate:.0f}/s now raw) "
+            f"attempts=({cumulative_attempt_rate:.0f}/s avg, "
+            f"{instant_attempt_rate:.0f}/s now 128eq) "
+            f"chance_weighted=({cumulative_chance_weighted_rate:.0f}/s avg, "
+            f"{instant_chance_weighted_rate:.0f}/s now) "
             f"launched={self._launch_count} "
             f"(launch_rate={instant_launch_rate:.1f}/s) "
             f"in_flight={in_flight}"
@@ -429,6 +558,13 @@ class DirectMiner:
                     f"({hits} hits, {misses} misses)"
                 )
 
+        if self._kernel_best_margin_log2 is not None:
+            logger.info(
+                f"[KERNEL HASH] best_margin_log2="
+                f"{self._kernel_best_margin_log2:.2f} "
+                f"records={self._kernel_hash_records}"
+            )
+
         self._last_log_time = now
         self._last_completed_count = completed
         self._last_launch_count = self._launch_count
@@ -437,12 +573,18 @@ class DirectMiner:
         elapsed = time.time() - self._start_time
         completed = self.tracker.completed_count
         rate = completed / elapsed if elapsed > 0 else 0
-        tile_rate = rate * self._outer_tiles_per_matmul
+        raw_outer_tile_rate = rate * self._outer_tiles_per_matmul
+        normalized_attempt_rate = rate * self._normalized_attempts_per_matmul
+        chance_weighted_rate = (
+            rate * self._chance_weighted_attempts_per_matmul
+        )
         logger.info(
             f"[DIRECT MINER] FINAL: completed={completed} "
             f"launched={self._launch_count} elapsed={elapsed:.1f}s "
             f"completion_rate={rate:.1f}/s "
-            f"tile_rate={tile_rate:.0f}/s"
+            f"raw_outer_tile_rate={raw_outer_tile_rate:.0f}/s "
+            f"normalized_attempt_rate={normalized_attempt_rate:.0f}/s "
+            f"chance_weighted_rate={chance_weighted_rate:.0f}/s"
         )
         if self.b_cache is not None:
             if self.diagnostics is not None:

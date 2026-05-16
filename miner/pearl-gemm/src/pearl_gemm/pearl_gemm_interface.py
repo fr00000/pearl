@@ -370,6 +370,7 @@ def noisy_gemm(
     mine_only: bool = False,
     inner_hash_counter: torch.Tensor | None = None,
     enable_debug: bool = False,
+    pow_diagnostics: torch.Tensor | None = None,
 ):
     """Perform noising, matmul, and denoising.
 
@@ -453,6 +454,8 @@ def noisy_gemm(
             API compatibility but is not written.
         inner_hash_counter: Optional tensor to count inner hashes (for testing/debugging).
         enable_debug: If True, enables debug mode for inner hash counting validation.
+        pow_diagnostics: Optional uint32 diagnostics buffer for best-hash
+            observability. Disabled when None.
     """
     pearl_gemm_cuda.noisy_gemm(
         A,
@@ -502,6 +505,7 @@ def noisy_gemm(
         mine_only,
         inner_hash_counter,
         enable_debug,
+        pow_diagnostics,
     )
 
 
@@ -547,6 +551,7 @@ def headless_mine(
     run_noising_B: bool = True,
     inner_hash_counter: torch.Tensor | None = None,
     enable_debug: bool = False,
+    pow_diagnostics: torch.Tensor | None = None,
 ):
     """Run noising plus the mining transcript/PoW path without C output."""
     pearl_gemm_cuda.headless_mine(
@@ -591,6 +596,7 @@ def headless_mine(
         run_noising_B,
         inner_hash_counter,
         enable_debug,
+        pow_diagnostics,
     )
 
 
@@ -644,6 +650,7 @@ def _abstract_noisy_gemm(
     mine_only=False,
     inner_hash_counter=None,
     enable_debug=False,
+    pow_diagnostics=None,
 ):
     return None
 
@@ -691,6 +698,7 @@ def _abstract_headless_mine(
     run_noising_B=True,
     inner_hash_counter=None,
     enable_debug=False,
+    pow_diagnostics=None,
 ):
     return None
 

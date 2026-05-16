@@ -239,9 +239,11 @@ __global__ void __launch_bounds__(
                               k_tile_count);
 
       if constexpr (!SkipReduction) {
-        local_block_found = check_pow_target(transcript_extraction_tensor,
-                                             mainloop_params.ptr_pow_target,
-                                             mainloop_params.ptr_pow_key);
+        local_block_found =
+            check_pow_target<KTraits::EnablePowDiagnostics>(
+                transcript_extraction_tensor, mainloop_params.ptr_pow_target,
+                mainloop_params.ptr_pow_key, mainloop_params.pow_diagnostics,
+                block_coord, consumer_tix);
 
         if (local_block_found) {
           write_host_signal_header<typename KTraits::TiledMma, TileShape_MNK>(
@@ -407,9 +409,11 @@ __global__ void __launch_bounds__(
                               block_found_k_tile, consumer_tix, shared_storage,
                               k_tile_count);
 
-      local_block_found = check_pow_target(transcript_extraction_tensor,
-                                           mainloop_params.ptr_pow_target,
-                                           mainloop_params.ptr_pow_key);
+      local_block_found =
+          check_pow_target<KTraits::EnablePowDiagnostics>(
+              transcript_extraction_tensor, mainloop_params.ptr_pow_target,
+              mainloop_params.ptr_pow_key, mainloop_params.pow_diagnostics,
+              block_coord, consumer_tix);
 
       if (local_block_found) {
         write_host_signal_header<typename KTraits::TiledMma, TileShape_MNK>(

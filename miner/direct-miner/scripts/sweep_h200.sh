@@ -26,7 +26,7 @@ OUTDIR="/workspace/sweeps/h200-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$OUTDIR"
 SUMMARY="$OUTDIR/summary.csv"
 
-echo "shape_id,m,n,k,max_in_flight,gpu,duration_s,total_matmuls,completion_rate_mm_s,tile_rate_per_s,errors,notes" > "$SUMMARY"
+echo "shape_id,m,n,k,max_in_flight,gpu,duration_s,total_matmuls,completion_rate_mm_s,raw_outer_tile_rate_per_s,normalized_attempt_rate_per_s,errors,notes" > "$SUMMARY"
 
 # 15 cells: shape_id|m|n|k|mif (round-robin distributed below)
 CELLS=(
@@ -103,7 +103,7 @@ run_one_cell() {
     # Parse FINAL line
     local final_line=$(grep "DIRECT MINER.*FINAL" "$log" | tail -1)
     local note=""
-    local completed="" elapsed="" comp_rate="" tile_rate="" errors=0
+    local completed="" elapsed="" comp_rate="" raw_outer_tile_rate="" normalized_attempt_rate="" errors=0
 
     if [[ -z "$final_line" ]]; then
         note="no_final"
@@ -115,16 +115,17 @@ run_one_cell() {
         completed=$(echo "$final_line" | grep -oP "completed=\K[0-9]+")
         elapsed=$(echo "$final_line" | grep -oP "elapsed=\K[0-9.]+")
         comp_rate=$(echo "$final_line" | grep -oP "completion_rate=\K[0-9.]+")
-        tile_rate=$(echo "$final_line" | grep -oP "tile_rate=\K[0-9]+")
+        raw_outer_tile_rate=$(echo "$final_line" | grep -oP "raw_outer_tile_rate=\K[0-9]+")
+        normalized_attempt_rate=$(echo "$final_line" | grep -oP "normalized_attempt_rate=\K[0-9]+")
         # grep -c always prints a count to stdout (even 0); the trailing `|| echo "0"` pattern
         # produces multi-line "0\n0" output that breaks $(( ... )) arithmetic. Use ; true instead.
         errors=$(grep -ciE "error|exception|traceback|cuda error" "$log" 2>/dev/null; true)
         terminate_noise=$(grep -ci "terminate called without an active exception" "$log" 2>/dev/null; true)
         errors=$(( ${errors:-0} - ${terminate_noise:-0} ))
-        echo "[GPU${gpu_idx}] DONE  $run_id  -> ${comp_rate} mm/s, ${tile_rate} tiles/s, errors=${errors}"
+        echo "[GPU${gpu_idx}] DONE  $run_id  -> ${comp_rate} mm/s, ${normalized_attempt_rate} attempts/s (${raw_outer_tile_rate} raw outer tiles/s), errors=${errors}"
     fi
 
-    write_summary "${shape_id},${m},${n},${k},${mif},${gpu_idx},${elapsed:-${DURATION_S}},${completed},${comp_rate},${tile_rate},${errors},${note}"
+    write_summary "${shape_id},${m},${n},${k},${mif},${gpu_idx},${elapsed:-${DURATION_S}},${completed},${comp_rate},${raw_outer_tile_rate},${normalized_attempt_rate},${errors},${note}"
 }
 
 # Run a worker that processes its job list sequentially.
@@ -166,10 +167,10 @@ if pgrep -f "/\.venv/bin/direct-miner" > /dev/null; then
     sleep 2
 fi
 
-# Sort summary by tile_rate for readability
+# Sort summary by normalized attempt rate for readability
 {
     head -1 "$SUMMARY"
-    tail -n +2 "$SUMMARY" | sort -t, -k10 -n -r
+    tail -n +2 "$SUMMARY" | sort -t, -k11 -n -r
 } > "$SUMMARY.sorted"
 mv "$SUMMARY.sorted" "$SUMMARY"
 

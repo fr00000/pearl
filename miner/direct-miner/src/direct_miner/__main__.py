@@ -63,6 +63,11 @@ def main():
              "the PoW signal/proof path."
     )
     parser.add_argument(
+        "--enable-kernel-hash-stats", action="store_true",
+        help="enable benchmark-only kernel best-hash diagnostics. "
+             "Adds atomics to the PoW path, so leave off for production."
+    )
+    parser.add_argument(
         "--kernel-tile-m", type=int, default=128,
         help="main mining kernel tile M dimension"
     )
@@ -91,6 +96,16 @@ def main():
         help="explicit MMA warpgroup register allocation; default uses "
              "the kernel heuristic"
     )
+    parser.add_argument(
+        "--kernel-swizzle", type=int, default=None,
+        help="override the mining kernel CTA scheduler swizzle; default "
+             "uses the pearl-gemm L2 heuristic"
+    )
+    parser.add_argument(
+        "--kernel-swizzle-m-major", action="store_true",
+        help="schedule swizzle groups in M-major order instead of the "
+             "default N-major order"
+    )
     args = parser.parse_args()
 
     setup_logging(args.log_level)
@@ -105,6 +120,7 @@ def main():
         enable_b_cache=args.enable_b_cache,
         enable_diagnostics=args.enable_diagnostics,
         enable_headless_kernel=args.enable_headless_kernel,
+        enable_kernel_hash_stats=args.enable_kernel_hash_stats,
         kernel_tile_size_m=args.kernel_tile_m,
         kernel_tile_size_n=args.kernel_tile_n,
         kernel_tile_size_k=args.kernel_tile_k,
@@ -112,6 +128,8 @@ def main():
         kernel_cluster_size_n=args.kernel_cluster_n,
         kernel_pipeline_stages=args.kernel_stages,
         kernel_mma_registers=args.kernel_mma_registers,
+        kernel_swizzle=args.kernel_swizzle,
+        kernel_swizzle_n_maj=not args.kernel_swizzle_m_major,
     )
 
     miner = DirectMiner(config)

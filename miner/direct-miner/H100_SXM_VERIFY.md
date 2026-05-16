@@ -12,12 +12,12 @@ Does the H200 stress sweep winner (`stress_n256` = 8192 × 262144 × 8192) carry
 
 ## Current production winner
 
-As of the 2026-05-15 headless/kernel sweep, the recommended H100/Hopper
+As of the 2026-05-15 chance-weighted shape sweep, the recommended H100/Hopper
 direct-miner command is:
 
 ```bash
 uv run direct-miner \
-  --m 8192 --n 524032 --k 8192 \
+  --m 8192 --n 261888 --k 16384 \
   --max-in-flight 4 \
   --enable-b-cache \
   --enable-headless-kernel \
@@ -29,9 +29,12 @@ uv run direct-miner \
   --kernel-cluster-n 1
 ```
 
-Confirmed 5-minute rate: **2,503,688 raw outer-tiles/s per GPU**, which is
-also **2,503,688 normalized 128-tile-equivalent attempts/s**. The startup
-scripts use this by default.
+Confirmed 5-minute rate: **1,292,734 normalized attempts/s per GPU**. Because
+the protocol difficulty target scales by `h * w * rounded_common_dim`, the
+coin-rate comparison across different `k` values is
+`normalized_attempt_rate * k`; this shape is **+3.22% expected mining chance**
+versus the prior `8192 x 524032 x 8192` production reference. The startup
+scripts use this shape by default.
 
 ## Results
 
@@ -573,6 +576,169 @@ Recommended production kernel flags:
 --kernel-cluster-n 1
 ```
 
-Do not pass `--kernel-mma-registers` for the production default yet. The
-`regs=160` 128-row variant was only a tiny one-minute improvement over default
-and has not been five-minute confirmed.
+## Five-minute focused kernel sweep
+
+On 2026-05-15 we ran a 5-minute-per-cell sweep around the current production
+winner on the H100 pod:
+
+```text
+m=8192 n=524032 k=8192
+max_in_flight=4
+headless kernel enabled
+B-cache enabled
+```
+
+The sweep logs and CSV were written on the pod under:
+
+```text
+/workspace/sweeps/kernel-h100-20260515-151433/
+```
+
+The miner now reports two rates:
+
+- `raw_outer_tile_rate`: CTA/outer-tile completions per second.
+- `normalized_attempt_rate`: protocol-comparable 128-equivalent PoW attempts/s.
+
+For `tile_m=128`, these are equal. For `tile_m=64`, normalized attempts are
+half the raw outer-tile rate because the CTA has only 128 MMA consumer threads
+instead of 256.
+
+| Variant | Normalized attempts/s | Delta vs prod default | Notes |
+|---|---:|---:|---|
+| `128x256x128 s3 c2x1 regs=160` | 2,517,887 | +0.46% | best measured, too small to promote |
+| `128x256x128 s3 c2x1 default regs` | 2,506,384 | baseline | current production |
+| `128x256x128 s3 c2x1 regs=224` | 2,506,873 | +0.02% | noise-level |
+| `128x256x128 s3 c2x1 regs=192` | 2,504,536 | -0.07% | noise-level |
+| `128x256x128 s4 c2x1` | 2,477,460 | -1.15% | deeper pipeline loses |
+| `128x256x128 s3 c1x2` | 2,404,479 | -4.07% | N-cluster loses |
+| `128x256x128 s4 c2x2` | 2,393,608 | -4.50% | N-cluster loses |
+| `128x256x128 s3 c2x2` | 2,391,764 | -4.57% | N-cluster loses |
+| `128x256x128 s4 c1x2` | 2,391,065 | -4.60% | N-cluster loses |
+| `128x256x128 s3 c1x1` | 2,302,027 | -8.15% | confirms `c2x1` is real |
+| `128x256x128 s4 c1x1` | 2,201,806 | -12.15% | loses |
+| `128x256x64 s4 c2x1` | 2,153,057 | -14.10% | shorter K tile loses |
+| `128x256x64 s3 c1x1` | 2,084,854 | -16.82% | shorter K tile loses |
+| `128x256x64 s3 c2x1` | 2,083,953 | -16.86% | shorter K tile loses |
+
+Skipped/guard cells:
+
+- `128x256x128 s5 c1x1` failed the pattern-inspector launch because the
+  kernel requested 246,784 bytes of shared memory, above the device limit
+  reported to that launch path.
+- `64x256x128 s3 c1x1/c2x1` passed pattern inspection but did not emit FINAL
+  lines before timeout cleanup. Their steady-state logs still showed the
+  normalized-accounting issue clearly: `c2x1` ran about **3.51M raw outer
+  tiles/s** but only **1.76M normalized attempts/s**, roughly **30% below**
+  the 128-row production kernel.
+
+Conclusion:
+
+- Keep production on `128x256x128, stages=3, cluster=2x1`.
+- Do **not** make `--kernel-mma-registers 160` the default yet. It was the best
+  5-minute cell, but only by +0.46%, which is below the threshold where the
+  operational risk and extra config surface are worth it.
+- Do not pursue `tile_k=64`, `cluster_n=2`, or `stages=4` for this production
+  shape.
+- Do not sweep `tile_n=128/512` as a simple runtime setting. The default proof
+  column pattern reaches columns 248/249, so non-256 N tiles need a separate
+  proof-pattern design before they can be production candidates.
+
+## Addendum: opt-in kernel hash observability
+
+The next kernel-support change is benchmark-only observability for the PoW hash
+path. It adds an optional per-slot `PowDiagnostics` buffer to `noisy_gemm` and
+`headless_mine`. When the pointer is null, the kernel takes the existing
+production path. When enabled, each PoW check increments an attempt counter and
+the kernel stores the best observed hash prefix for the completed call.
+
+Direct miner flag:
+
+```bash
+--enable-kernel-hash-stats
+```
+
+Recommended benchmark usage:
+
+```bash
+--enable-kernel-hash-stats \
+--enable-diagnostics \
+--metrics-output /workspace/kernel-hash-smoke.jsonl
+```
+
+New JSONL fields:
+
+```text
+kernel_hash_attempts
+kernel_best_hash_hex
+kernel_best_tile_coord
+kernel_best_thread_idx
+best_observed_hash_log2
+margin_log2
+```
+
+This is intentionally not a production default. The diagnostic path adds
+atomics to the PoW hot path and is meant to answer, "is this kernel producing a
+reasonable hash distribution?" without waiting for a rare network win. It does
+not alter proof generation, gateway submission, or the host-signal winner path.
+
+Validation:
+
+- Built and installed `pearl-gemm` on the H100 pod after adding the diagnostics
+  pointer through `PearlAPIParams`, `CollectiveMainloop`, and both GEMM entry
+  points.
+- Verified `get_pow_diagnostics_size() == 16`.
+- Ran a 70-second smoke with `m=1024 n=8192 k=8192`, B-cache, headless kernel,
+  diagnostics, and kernel hash stats. The run completed 84 matmuls and wrote 84
+  JSONL records.
+- Each record reported `kernel_hash_attempts=65536`, matching the expected
+  `256` outer tiles × `256` MMA consumer threads for that smoke shape.
+
+Follow-up disabled-path check:
+
+- The initial observability version measured `2.447M-2.451M` normalized
+  attempts/s with kernel stats disabled, about 2.3% below the pre-observability
+  `2,506,384/s` reference.
+- Moved diagnostics selection into the kernel template as
+  `EnablePowDiagnostics`; production instantiates `false`, and the diagnostics
+  write path is guarded by `if constexpr`.
+- Rebuilt on the H100 pod with:
+
+```bash
+MAX_JOBS=4 \
+PEARL_GEMM_DISABLE_DEBUG_MODE=TRUE \
+PEARL_GEMM_FORCE_BUILD=TRUE \
+uv pip install --no-build-isolation -e miner/pearl-gemm
+```
+
+- Re-ran the hash smoke with a clean SIGINT drain. It wrote 164 matmul records
+  plus session end, each with `kernel_hash_attempts=65536`.
+- Re-ran production mode with kernel hash stats and JSON diagnostics disabled:
+  `m=8192 n=524032 k=8192`, B-cache, headless, `max_in_flight=4`,
+  `128x256x128`, `stages=3`, `cluster=2x1`.
+- Final production-disabled result: 1,985 completed matmuls in 103.8s,
+  `normalized_attempt_rate=2,504,835/s`.
+
+Conclusion: compile-time diagnostics recover the disabled-path regression to
+within measurement noise of the original production reference.
+
+Production-shape hash distribution check:
+
+- Ran a bounded 240-second observability sample with the production shape and
+  kernel settings: `m=8192 n=524032 k=8192`, B-cache, headless,
+  `max_in_flight=4`, `128x256x128`, `stages=3`, `cluster=2x1`.
+- The stats path is intentionally slow because it adds atomics to the PoW hot
+  path; this run is a distribution check, not a throughput benchmark.
+- Completed 423 matmul records in 235.0s.
+- Every record reported `kernel_hash_attempts=33,538,048`, equal to
+  `131,008` CTAs × `256` MMA consumer threads.
+- Mean best hash log2 was `230.172`; random-hash expectation for
+  `33,538,048` attempts is `230.168`.
+- Best hash log2 over the run was `223.427`; expected run-best across all
+  sampled attempts is about `221.443`, comfortably plausible for this sample
+  size.
+- Best observed margin over target was `16.410 log2`.
+
+Conclusion: production-shape kernel hash behavior is statistically sane. The
+kernel is producing the expected number of lottery tickets, and their quality
+matches the random-hash expectation closely enough that future kernel work
+should focus on speed, not lottery-ticket correctness.

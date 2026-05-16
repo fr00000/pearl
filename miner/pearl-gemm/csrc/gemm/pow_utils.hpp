@@ -5,6 +5,7 @@
 
 #include "blake3/blake3.cuh"
 #include "host_signal_header.hpp"
+#include "pow_diagnostics.hpp"
 #include "utils.h"
 
 namespace pearl {
@@ -201,10 +202,14 @@ struct TileHashAccumulator {
 
 /// Compress transcript using BLAKE3 and check against PoW target.
 /// Returns true if hash <= target (block found).
-template <typename TranscriptTensor>
+template <bool EnablePowDiagnostics, typename TranscriptTensor,
+          typename BlockCoord>
 CUTLASS_DEVICE bool check_pow_target(const TranscriptTensor& transcript,
                                      const uint32_t* pow_target,
-                                     const uint32_t* pow_key) {
+                                     const uint32_t* pow_key,
+                                     PowDiagnostics* pow_diagnostics,
+                                     BlockCoord const& block_coord,
+                                     int thread_idx) {
   // Compress transcript using keyed BLAKE3 to get 32-byte hash
   Tensor hash = make_tensor<uint32_t>(Int<blake3::CHAINING_VALUE_SIZE_U32>{});
   CUTLASS_PRAGMA_UNROLL
@@ -213,6 +218,15 @@ CUTLASS_DEVICE bool check_pow_target(const TranscriptTensor& transcript,
   }
   blake3::compress_msg_block_u32(transcript, hash,
                                  blake3::COMPRESS_PARAMS_SINGLE_BLOCK_KEYED);
+
+  if constexpr (EnablePowDiagnostics) {
+    cute::array<uint32_t, blake3::CHAINING_VALUE_SIZE_U32> hash_words;
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < blake3::CHAINING_VALUE_SIZE_U32; ++i) {
+      hash_words[i] = hash(i);
+    }
+    record_pow_diagnostics(pow_diagnostics, hash_words, block_coord, thread_idx);
+  }
 
   // uint256 comparison: hash <= target
   // Compare from MSW to LSW (index 7 = MSW, index 0 = LSW)
