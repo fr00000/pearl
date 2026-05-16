@@ -284,6 +284,69 @@ normal measurement noise and consistent with the heuristic already choosing 8
 for `k=16384`, `tile_n=256` on H100. Keep the override for future sweeps, but
 do not set it in production scripts.
 
+### 2026-05-15/16 Tile-Shape Compile Probes
+
+Pod artifacts:
+
+```text
+/workspace/sweeps/kernel-compile-probes-20260515/
+/workspace/sweeps/bk256-s2-bench-20260516-002726/direct_miner.log
+```
+
+Experiment: test whether larger mainloop tiles can create more useful mining
+work per CTA or reduce K-loop overhead.
+
+Results:
+
+| Probe | Result | Decision |
+|---|---|---|
+| `256x256x128 stages=3 cluster=1x1/2x1` | ptxas failed with insufficient registers (`96`, target at least `154`) | reject |
+| `192x256x128 stages=3 cluster=1x1/2x1` | ptxas failed with insufficient registers (`128`, target at least `154`) | reject |
+| `128x256x256 stages=3 cluster=2x1` | compiled, but launch requested `289 KB` shared memory on an H100 with a `227 KB` opt-in limit | reject |
+| `128x256x256 stages=2 cluster=2x1` | pattern-compatible, but benchmarked at `1,195,438` normalized attempts/s and `19,586,051,786` chance-weighted/s | reject |
+
+The `128x256x256 stages=2` forced-win pattern check matched the default proof
+rows and columns for all four iterations. It was therefore valid but slower:
+about **-7.5%** versus the current production reference of `1,292,734`
+normalized attempts/s and `21,180,153,856` chance-weighted/s.
+
+Conclusion: wider-M tile shapes are blocked by register pressure with the
+current kernel structure, and bK=256 gives back too much pipeline overlap when
+reduced to two stages. Keep production on `128x256x128 stages=3 cluster=2x1`.
+
+### 2026-05-16 Direct Transcript Hash Rejection
+
+Pod artifacts:
+
+```text
+/workspace/sweeps/direct-hash-bench-20260516-011209/direct_miner.log
+/workspace/sweeps/direct-hash-repeat-20260516-011427/direct_miner.log
+```
+
+Experiment: add a mine-only transcript accumulator that updates transcript
+words directly at each reduction point, instead of using the generic
+`TileHashAccumulator` preload/writeback helper. The goal was to remove small
+register moves around the 16-word transcript for `bK=R=128`.
+
+Safety checks:
+
+```text
+uv run --no-sync pytest miner/direct-miner/tests  # 30 passed
+direct-miner-inspect-pattern ... 128x256x128 stages=3 cluster=2x1
+PATTERN_COMPATIBLE=true
+```
+
+Benchmark results on the current production shape:
+
+| Variant | Normalized attempts/s | Chance-weighted rate | Decision |
+|---|---:|---:|---|
+| direct transcript hash run 1 | 1,297,814 | 21,263,383,372 | reject: noise-level |
+| direct transcript hash run 2 | 1,297,011 | 21,250,226,164 | reject: noise-level |
+
+The result is only about `+0.3-0.4%` versus the older `1,292,734` reference and
+overlaps prior no-patch short-run noise near `1,297,360`. It is not a durable
+improvement, so the code was reverted.
+
 ### Rejected: Final WGMMA Wait Elision
 
 Experiment: have `TileHashAccumulator::accumulate()` report whether it already
