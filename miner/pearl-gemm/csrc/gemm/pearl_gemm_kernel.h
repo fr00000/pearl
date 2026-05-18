@@ -381,7 +381,9 @@ __global__ void __launch_bounds__(
       }
     }
   } else {
-    cutlass::arch::warpgroup_reg_alloc<KTraits::MmaRegisters>();
+    if constexpr (!KTraits::UseOneProducerWarp) {
+      cutlass::arch::warpgroup_reg_alloc<KTraits::MmaRegisters>();
+    }
 
     TileScheduler scheduler{};
     typename KTraits::TiledMma tiled_mma;
