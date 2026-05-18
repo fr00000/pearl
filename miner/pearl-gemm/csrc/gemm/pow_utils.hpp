@@ -75,45 +75,44 @@ constexpr auto xor_tree_layer_sizes() {
   }
 }
 
-// XOR reduction of all uint32 elements in the input tensor.
-//
-// Keep the reduction streaming to avoid materializing a temporary reduction
-// tree beside the live WGMMA accumulator fragment. The four independent lanes
-// preserve some instruction-level parallelism without creating a large register
-// scratch array.
+// XOR reduction of all uint32 elements in the input tensor
+// Uses tree reduction with lop3
 template <typename TensorType>
 CUTE_DEVICE uint32_t xor_reduction(const TensorType& input_tensor) {
   constexpr size_t buffer_size =
       decltype(std::declval<TensorType>().size())::value;
-  constexpr size_t groups_of_4 = buffer_size / 4;
-  constexpr size_t remainder = buffer_size % 4;
 
   static_assert(buffer_size > 0, "Buffer size must be positive");
 
-  uint32_t x0 = 0;
-  uint32_t x1 = 0;
-  uint32_t x2 = 0;
-  uint32_t x3 = 0;
-
+  // "cast" input tensor to array, compiler optimizes this away as everything is in registers
+  cute::array<uint32_t, buffer_size> first_layer;
   CUTLASS_PRAGMA_UNROLL
-  for (size_t i = 0; i < groups_of_4; ++i) {
-    x0 ^= static_cast<uint32_t>(input_tensor[4 * i + 0]);
-    x1 ^= static_cast<uint32_t>(input_tensor[4 * i + 1]);
-    x2 ^= static_cast<uint32_t>(input_tensor[4 * i + 2]);
-    x3 ^= static_cast<uint32_t>(input_tensor[4 * i + 3]);
+  for (size_t i = 0; i < buffer_size; ++i) {
+    first_layer[i] = input_tensor[i];
   }
 
-  if constexpr (remainder >= 1) {
-    x0 ^= static_cast<uint32_t>(input_tensor[4 * groups_of_4]);
-  }
-  if constexpr (remainder >= 2) {
-    x1 ^= static_cast<uint32_t>(input_tensor[4 * groups_of_4 + 1]);
-  }
-  if constexpr (remainder >= 3) {
-    x2 ^= static_cast<uint32_t>(input_tensor[4 * groups_of_4 + 2]);
-  }
+  // Get layer size configuration (excluding first layer which we already have)
+  constexpr auto all_layer_sizes = xor_tree_layer_sizes<buffer_size>();
+  constexpr auto remaining_layers = cute::take<1, -1>(all_layer_sizes);
 
-  return xor3_lop3(x0, x1, x2) ^ x3;
+  // Tree reduction using fold
+  auto final_layer = cute::fold(
+      remaining_layers, first_layer, [](auto const& layer, auto target_size) {
+        return process_xor_layer<decltype(target_size)>(layer);
+      });
+
+  // Final reduction based on remaining elements
+  constexpr size_t final_size = cute::tuple_size_v<decltype(final_layer)>;
+  static_assert(final_size >= 1 && final_size <= 3,
+                "Final layer should have 1-3 elements");
+
+  if constexpr (final_size == 1) {
+    return final_layer[0];
+  } else if constexpr (final_size == 2) {
+    return final_layer[0] ^ final_layer[1];
+  } else {
+    return xor3_lop3(final_layer[0], final_layer[1], final_layer[2]);
+  }
 }
 
 /// Tile-based hash accumulator for register-optimized transcript updates.

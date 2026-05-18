@@ -347,6 +347,48 @@ copies are all too small to produce a meaningful coin-rate jump. Future work
 should focus on changing the live accumulator/transcript structure inside the
 mine kernel, not on surrounding launch or preprocessing work.
 
+## 2026-05-18 Streaming XOR Live-State Probe
+
+Pod artifacts:
+
+```text
+/workspace/build-logs/h100-streaming-xor-20260518-114422.log
+/workspace/sweeps/h100-streaming-xor-20260518-115242.log
+/workspace/build-logs/h100-streaming-xor-m192-20260518-115708.log
+```
+
+We tested whether replacing the transcript XOR tree reduction with a four-lane
+streaming XOR could reduce live register pressure near the WGMMA accumulator
+enough to either speed up the production tile or unlock the larger `tile_m=192`
+geometry.
+
+The production tile built and passed the forced-win pattern inspector:
+
+```text
+PATTERN_COMPATIBLE=true
+rows=[0, 8]
+cols=[0, 1, 8, 9, ..., 248, 249]
+```
+
+Runtime result at the current H100 production shape:
+
+| Variant | Validation | Normalized attempts/s | Delta vs production | Decision |
+|---|---|---:|---:|---|
+| Streaming XOR, `128x256x128 s3 c2x1 regs160` | pattern-compatible | ~643,600 | -2.0% to -2.2% | reject |
+
+The same reducer did not move the `tile_m=192` compile boundary. Both `c1x1`
+and `c2x1` `192x256x128 regs160` variants still failed in PTXAS:
+
+```text
+ptxas fatal : (C7602) Insufficient registers (128)
+Try to compile with register target of 154 or higher.
+```
+
+Decision: revert the streaming XOR reducer and the temporary `tile_m=192`
+compile variants. The original tree reduction is faster for the production
+kernel, and the larger tile still needs a deeper live-state rewrite rather than
+a local reduction change.
+
 ## 2026-05-18 H100 PoW Hot-Path Micro-Optimizations
 
 Pod artifacts:

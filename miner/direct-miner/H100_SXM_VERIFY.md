@@ -262,6 +262,41 @@ mainloop/transcript machinery. Optimizing Python, noising, Merkle roots, CUDA
 copies, or gateway-side launch plumbing cannot produce a large mining gain at
 this point.
 
+### 2026-05-18 streaming XOR live-state probe
+
+Pod artifacts:
+
+```text
+/workspace/build-logs/h100-streaming-xor-20260518-114422.log
+/workspace/sweeps/h100-streaming-xor-20260518-115242.log
+/workspace/build-logs/h100-streaming-xor-m192-20260518-115708.log
+```
+
+We tried to reduce accumulator-side live state by changing the transcript XOR
+reduction from the original compile-time tree to a four-lane streaming XOR. The
+production tile built and stayed proof-pattern compatible:
+
+```text
+PATTERN_COMPATIBLE=true
+rows=[0, 8]
+cols=[0, 1, 8, 9, ..., 248, 249]
+```
+
+But the steady production-shape rate fell to about `643.6k` normalized
+attempts/s, roughly `-2%` versus the current `~656k-658k` production reference.
+Using the same reducer to probe `tile_m=192` did not help either; both
+`192x256x128 c1x1 regs160` and `192x256x128 c2x1 regs160` still failed at
+compile time:
+
+```text
+ptxas fatal : (C7602) Insufficient registers (128)
+Try to compile with register target of 154 or higher.
+```
+
+Decision: reject and revert. The tree reducer remains the production choice,
+and `tile_m=192` still needs a deeper rewrite of the live transcript or CTA
+layout before it can compile.
+
 ### 2026-05-18 PoW hot-path micro-optimizations
 
 Pod artifacts:
