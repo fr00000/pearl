@@ -173,11 +173,10 @@ for cM, cN, mma_registers in [
     )
 
 for cM, cN, mma_registers in [
-    (1, 1, 0),
-    (1, 1, 96),
-    (1, 1, 112),
-    (2, 1, 96),
-    (2, 1, 112),
+    (1, 1, 160),
+    (1, 1, 192),
+    (2, 1, 160),
+    (2, 1, 192),
 ]:
     _add_matmul_kernel(
         tile_size_m=256,

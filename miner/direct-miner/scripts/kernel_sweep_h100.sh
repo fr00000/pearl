@@ -65,11 +65,10 @@ VARIANTS=(
     "k256_s2_c2x1_regs192|128|256|256|2|2|1|192|tile_k_probe"
     "m64_s3_c1x1|64|256|128|3|1|1||normalization_guard"
     "m64_s3_c2x1|64|256|128|3|2|1||normalization_guard"
-    "m256_s3_c1x1|256|256|128|3|1|1||tile_m_probe"
-    "m256_s3_c1x1_regs96|256|256|128|3|1|1|96|tile_m_probe"
-    "m256_s3_c1x1_regs112|256|256|128|3|1|1|112|tile_m_probe"
-    "m256_s3_c2x1_regs96|256|256|128|3|2|1|96|tile_m_probe"
-    "m256_s3_c2x1_regs112|256|256|128|3|2|1|112|tile_m_probe"
+    "m256_s3_c1x1_regs160|256|256|128|3|1|1|160|tile_m_probe"
+    "m256_s3_c1x1_regs192|256|256|128|3|1|1|192|tile_m_probe"
+    "m256_s3_c2x1_regs160|256|256|128|3|2|1|160|tile_m_probe"
+    "m256_s3_c2x1_regs192|256|256|128|3|2|1|192|tile_m_probe"
 )
 
 echo "Kernel sweep output: $OUTDIR"
