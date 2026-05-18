@@ -74,8 +74,6 @@ VARIANTS=(
     "k256_s2_c2x1_regs192|128|256|256|2|2|1|192|tile_k_probe"
     "m64_s3_c1x1|64|256|128|3|1|1||normalization_guard"
     "m64_s3_c2x1|64|256|128|3|2|1||normalization_guard"
-    "m192_s3_c1x1_regs160|192|256|128|3|1|1|160|producer_consumer_geometry"
-    "m192_s3_c2x1_regs160|192|256|128|3|2|1|160|producer_consumer_geometry"
 )
 
 echo "Kernel sweep output: $OUTDIR"
