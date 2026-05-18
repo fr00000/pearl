@@ -8,6 +8,13 @@
 
 set -uo pipefail
 
+direct_miner_pids() {
+    ps -eo pid=,comm=,args= | awk '
+        $0 ~ /\/\.venv\/bin\/direct-miner/ { print $1; next }
+        $2 ~ /python/ && $0 ~ / -m direct_miner/ { print $1; next }
+    '
+}
+
 REPO_DIR="${REPO_DIR:-/root/pearl}"
 if [[ -f "${REPO_DIR}/env.sh" ]]; then
     source "${REPO_DIR}/env.sh"
@@ -18,7 +25,7 @@ if ! pgrep -f pearl-gateway > /dev/null; then
     exit 1
 fi
 
-if pgrep -f "/\.venv/bin/direct-miner|python -m direct_miner" > /dev/null; then
+if [[ -n "$(direct_miner_pids)" ]]; then
     echo "ERROR: direct-miner already running. Stop it first."
     exit 1
 fi
@@ -157,9 +164,10 @@ for entry in "${VARIANTS[@]}"; do
     fi
 
     sleep 5
-    if pgrep -f "/\.venv/bin/direct-miner|python -m direct_miner" > /dev/null; then
+    leftover_pids="$(direct_miner_pids)"
+    if [[ -n "$leftover_pids" ]]; then
         echo "  -> warning: direct-miner still running; force-killing"
-        pkill -9 -f "/\.venv/bin/direct-miner|python -m direct_miner" 2>/dev/null
+        kill -9 $leftover_pids 2>/dev/null
         sleep 3
     fi
 
