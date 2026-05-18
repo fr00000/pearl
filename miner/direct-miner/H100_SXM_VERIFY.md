@@ -70,6 +70,41 @@ Decision: promote `8192 x 262144 x 32768`. It keeps the same 8 GiB B tensor
 footprint as the previous production shape, while the A-slot pool grows from
 about 1.58 GiB to about 2.36 GiB at `max_in_flight=4`.
 
+### 2026-05-18 persistent scheduler probe
+
+Pod artifacts:
+
+```text
+/workspace/build-logs/h100-persistent-scheduler-uv-sync-20260518-093836.log
+/workspace/sweeps/kernel-h100-20260518-095157/summary.csv
+```
+
+We tested a larger scheduling rewrite: replace the mine-only
+`SingleTileScheduler` with a cluster-aware persistent scheduler so each
+resident cluster walks the swizzled logical tile grid by grid-stride iteration.
+The goal was to reduce per-CTA prologue/scheduler overhead in `hopper_mine_ws`.
+
+Validation:
+
+```text
+PATTERN_COMPATIBLE=true
+rows=[0, 8]
+cols=[0, 1, 8, 9, ..., 248, 249]
+```
+
+Benchmark result on the production shape:
+
+| Scheduler | Normalized attempts/s | Delta |
+|---|---:|---:|
+| single-tile production reference | 656,523 | baseline |
+| persistent cluster scheduler | 498,967 | -24.0% |
+
+The persistent scheduler was correct but slower, likely because the current
+Hopper mine-only pipeline prefers one logical tile per CTA cluster and loses
+more from reduced hardware work distribution than it gains from amortized
+prologue. The experiment was reverted. Keep the production launch on the
+single-tile scheduler.
+
 ### 2026-05-18 second-pass kernel probes
 
 Pod artifacts:

@@ -29,6 +29,35 @@ and equal-B-memory K sweep. It keeps the same 8 GiB B tensor footprint as the
 prior `8192x524288x16384` setting but shifts work to `k=32768`, improving the
 chance-weighted mining rate by `+0.76%` in a same-session four-minute confirm.
 
+## 2026-05-18 Persistent Scheduler Probe
+
+Pod artifacts:
+
+```text
+/workspace/build-logs/h100-persistent-scheduler-uv-sync-20260518-093836.log
+/workspace/sweeps/kernel-h100-20260518-095157/summary.csv
+```
+
+Hypothesis: a persistent cluster scheduler might amortize per-CTA prologue and
+scheduler overhead in `hopper_mine_ws` by launching roughly one resident CTA
+cluster per SM group and walking the logical tile grid inside each cluster.
+This followed NVIDIA's documented Hopper persistent/cooperative scheduler model.
+
+Result: rejected.
+
+| Kernel scheduler | Normalized attempts/s | Delta vs production |
+|---|---:|---:|
+| current single-tile scheduler | 656,523 reference | baseline |
+| persistent cluster scheduler | 498,967 | -24.0% |
+
+The persistent prototype built successfully and passed the forced-win pattern
+inspector (`PATTERN_COMPATIBLE=true`), so it did not break proof-visible
+row/column extraction. It was simply much slower on the production H100 shape,
+and the benchmark miner was killed during shutdown before emitting a final line.
+Decision: keep the production kernel on the single-tile scheduler. Future big
+kernel work should focus on the mainloop/microarchitecture rather than
+grid-stride persistent scheduling.
+
 ## Metric Rule
 
 Use `normalized_attempt_rate`, not raw outer-tile rate, when comparing kernel

@@ -161,7 +161,7 @@ void run_pearl_mine(PearlAPIParams const& params, cudaStream_t stream = 0) {
   using CollectiveMainloop = pearl::CollectiveMainloop<KTraits>;
 
   using ClusterShape = typename KTraits::ClusterShape_MNK;
-  using Scheduler = pearl::ClusterPersistentTileScheduler;
+  using Scheduler = pearl::SingleTileScheduler;
   int num_blocks_m = cutlass::ceil_div(params.m, KTraits::bM);
   int num_blocks_n = cutlass::ceil_div(params.n, KTraits::bN);
   int num_clusters_m = cutlass::ceil_div(num_blocks_m, size<0>(ClusterShape{}));
@@ -172,20 +172,6 @@ void run_pearl_mine(PearlAPIParams const& params, cudaStream_t stream = 0) {
   int swizzle_divisor =
       params.swizzle_n_maj ? size<1>(ClusterShape{}) : size<0>(ClusterShape{});
   int swizzle = cutlass::ceil_div(params.swizzle, swizzle_divisor);
-
-  int device;
-  cudaGetDevice(&device);
-  int multiprocessor_count;
-  cudaDeviceGetAttribute(&multiprocessor_count, cudaDevAttrMultiProcessorCount,
-                         device);
-  int const cluster_size = int(size(ClusterShape{}));
-  int const total_clusters = num_clusters_m * num_clusters_n;
-  int launched_clusters =
-      (multiprocessor_count + cluster_size - 1) / cluster_size;
-  launched_clusters = launched_clusters < 1 ? 1 : launched_clusters;
-  launched_clusters = launched_clusters < total_clusters ? launched_clusters
-                                                        : total_clusters;
-
   typename CollectiveMainloop::Arguments mainloop_args{
       .ptr_A = static_cast<ElementIn*>(params.ptr_ApEA),
       .ptr_B = static_cast<ElementIn*>(params.ptr_BpEB),
@@ -205,16 +191,12 @@ void run_pearl_mine(PearlAPIParams const& params, cudaStream_t stream = 0) {
                                          .num_blocks_n = num_blocks_n,
                                          .num_clusters_m = num_clusters_m,
                                          .num_clusters_n = num_clusters_n,
-                                         .cluster_size_m =
-                                             int(size<0>(ClusterShape{})),
-                                         .cluster_size_n =
-                                             int(size<1>(ClusterShape{})),
-                                         .launched_clusters =
-                                             launched_clusters,
                                          .swizzle = swizzle,
                                          .swizzle_n_maj = params.swizzle_n_maj};
   Scheduler::Params scheduler_params =
       Scheduler::to_underlying_arguments(scheduler_args);
+  int device;
+  cudaGetDevice(&device);
 
   void* kernel = (void*)pearl::hopper_mine_ws<KTraits, Scheduler>;
   int smem_size = sizeof(typename KTraits::SharedStorage);
@@ -240,6 +222,9 @@ void run_pearl_mine(PearlAPIParams const& params, cudaStream_t stream = 0) {
     }
   }
 
+  int multiprocessor_count;
+  cudaDeviceGetAttribute(&multiprocessor_count, cudaDevAttrMultiProcessorCount,
+                         device);
   dim3 grid_dims =
       Scheduler::get_grid_dim(scheduler_args, multiprocessor_count);
 
