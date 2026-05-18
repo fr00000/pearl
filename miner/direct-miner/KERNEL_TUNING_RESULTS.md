@@ -206,6 +206,23 @@ increment than the 8 GiB -> 16 GiB move, but it is a measured expected-coin
 gain over 16 GiB (`21.741B` vs `21.682B`, about `+0.27%`) and the eviction path
 removes the observed OOM failure mode.
 
+Live churn sanity check:
+
+```text
+/workspace/sweeps/h100-live-churn-16g-20260518-173709/summary.csv
+```
+
+Because the clean 16 GiB confirm had no template invalidation while live 32 GiB
+production hit several, we ran a fresh 16 GiB cell under the current network
+churn:
+
+| Shape | B tensor | Normalized attempts/s | Chance-weighted rate | Invalidations |
+|---|---:|---:|---:|---:|
+| `8192x524288x32768` | 16 GiB | 660,646 | 21,648,051,416 | 1 |
+
+That is below the post-fix 32 GiB confirmation and in the same band as the live
+32 GiB production intervals, so the 32 GiB default remains preferred.
+
 ### Swizzle Recheck on Promoted Shape
 
 Pod artifact:

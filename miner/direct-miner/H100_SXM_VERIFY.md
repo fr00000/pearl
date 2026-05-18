@@ -91,6 +91,19 @@ Post-fix confirmation:
 Decision: promote `8192 x 1048576 x 32768`. The run crossed a template change,
 logged the stale-cache eviction, and avoided the previous OOM churn.
 
+Live churn sanity check:
+
+```text
+/workspace/sweeps/h100-live-churn-16g-20260518-173709/summary.csv
+```
+
+| Shape | B tensor | Final normalized attempts/s | Chance-weighted rate | Invalidations |
+|---|---:|---:|---:|---:|
+| `8192 x 524288 x 32768` | 16 GiB | 660,646 | 21,648,051,416 | 1 |
+
+The live 16 GiB comparison stayed below the post-fix 32 GiB confirmation and
+did not disprove the 32 GiB default under template churn.
+
 Swizzle recheck on the promoted shape:
 
 ```text
