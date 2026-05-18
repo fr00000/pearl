@@ -74,3 +74,30 @@ def chance_weighted_attempts_per_matmul(
     return normalized_attempts_per_matmul(
         m=m, n=n, tile_m=tile_m, tile_n=tile_n
     ) * rounded_common_dim(k=k, rank=rank)
+
+
+def protocol_weighted_attempts_per_matmul(
+    *,
+    m: int,
+    n: int,
+    k: int,
+    rank: int,
+    tile_m: int,
+    tile_n: int,
+    hash_tile_elements: int,
+) -> float:
+    """Return expected-work units including the proof pattern size.
+
+    ``chance_weighted_attempts_per_matmul`` intentionally omits ``h*w`` because
+    all production comparisons used the same row/column pattern. Experiments
+    with narrower or wider proof patterns need the full protocol adjustment:
+    normalized attempts * h * w * rounded_common_dim.
+    """
+    if hash_tile_elements <= 0:
+        raise ValueError("hash_tile_elements must be positive")
+    return (
+        chance_weighted_attempts_per_matmul(
+            m=m, n=n, k=k, rank=rank, tile_m=tile_m, tile_n=tile_n
+        )
+        * hash_tile_elements
+    )

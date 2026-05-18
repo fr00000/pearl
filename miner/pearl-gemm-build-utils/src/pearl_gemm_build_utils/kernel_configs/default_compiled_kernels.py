@@ -173,6 +173,29 @@ for cM, cN, mma_registers in [
         mma_registers=mma_registers,
     )
 
+# Non-default proof-pattern research grid. These narrower-N variants are not
+# production candidates under the default 256-column pattern; they are compiled
+# so the pattern inspector can derive matching row/column configurations and
+# benchmark the full h*w*k protocol-weighted chance rate.
+for tile_size_m, cM, cN, mma_registers in [
+    (128, 1, 1, 0),
+    (128, 2, 1, 160),
+    (128, 2, 1, 96),
+    (192, 1, 1, 128),
+    (192, 2, 1, 128),
+    (256, 1, 1, 96),
+]:
+    _add_matmul_kernel(
+        tile_size_m=tile_size_m,
+        tile_size_n=128,
+        tile_size_k=128,
+        R=128,
+        pipeline_stages=3,
+        cM=cM,
+        cN=cN,
+        mma_registers=mma_registers,
+    )
+
 # Noising A: 64x64, fp16/int32
 _noising_a_kernels = [
     NoisingAKernelConfig(

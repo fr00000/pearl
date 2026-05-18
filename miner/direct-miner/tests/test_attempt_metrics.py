@@ -6,6 +6,7 @@ from direct_miner.attempt_metrics import (
     normalized_attempt_scale,
     normalized_attempts_per_matmul,
     outer_tiles_per_matmul,
+    protocol_weighted_attempts_per_matmul,
     rounded_common_dim,
 )
 
@@ -50,3 +51,29 @@ def test_chance_weighted_attempts_scale_by_rounded_common_dim():
     assert rounded_common_dim(k=8193, rank=128) == 8192
     assert current_per_matmul == 131_008 * 8192
     assert high_k_per_matmul == 65_472 * 16_384
+
+
+def test_protocol_weighted_attempts_include_pattern_size():
+    base = chance_weighted_attempts_per_matmul(
+        m=8192, n=262144, k=32768, rank=128, tile_m=128, tile_n=256
+    )
+    assert protocol_weighted_attempts_per_matmul(
+        m=8192,
+        n=262144,
+        k=32768,
+        rank=128,
+        tile_m=128,
+        tile_n=256,
+        hash_tile_elements=128,
+    ) == base * 128
+
+    with pytest.raises(ValueError):
+        protocol_weighted_attempts_per_matmul(
+            m=8192,
+            n=262144,
+            k=32768,
+            rank=128,
+            tile_m=128,
+            tile_n=256,
+            hash_tile_elements=0,
+        )
