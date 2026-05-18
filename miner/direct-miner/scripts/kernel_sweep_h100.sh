@@ -52,6 +52,10 @@ echo "variant_id,m,n,k,tile_m,tile_n,tile_k,stages,cluster_m,cluster_n,mma_regis
 # inspection pass before they are meaningful production candidates.
 VARIANTS=(
     "prod_default|128|256|128|3|2|1||current_production"
+    "prod_regs96|128|256|128|3|2|1|96|low_register_probe"
+    "prod_regs112|128|256|128|3|2|1|112|low_register_probe"
+    "prod_regs128|128|256|128|3|2|1|128|low_register_probe"
+    "prod_regs144|128|256|128|3|2|1|144|low_register_probe"
     "prod_regs160|128|256|128|3|2|1|160|register_confirm"
     "prod_regs192|128|256|128|3|2|1|192|register_confirm"
     "prod_regs224|128|256|128|3|2|1|224|register_confirm"

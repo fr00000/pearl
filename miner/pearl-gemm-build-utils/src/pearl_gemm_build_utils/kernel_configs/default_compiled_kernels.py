@@ -103,7 +103,7 @@ for tile_size_m, tile_size_n, tile_size_k, pipeline_stages, cM, cN in [
 # Register-allocation sweep for the current production winner and the
 # strongest 64x256x128 probe family. mma_registers=0 kernels above keep the
 # existing default heuristic, so we only add explicit non-default values.
-for mma_registers in [160, 192, 224]:
+for mma_registers in [96, 112, 128, 144, 160, 192, 224]:
     _add_matmul_kernel(
         tile_size_m=128,
         tile_size_n=256,
