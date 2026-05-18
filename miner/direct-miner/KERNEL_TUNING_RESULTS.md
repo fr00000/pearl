@@ -633,6 +633,41 @@ already handling this case well enough that the explicit fast path loses
 throughput, likely by perturbing scheduling/register allocation rather than
 removing a true bottleneck.
 
+### Split-N Mine-Only Accumulator Probe
+
+Pod artifacts:
+
+```text
+/workspace/build-logs/h100-splitn-mine-parallel-20260518-202433.log
+/workspace/build-logs/h100-splitn-sequential-mine-parallel-20260518-203423.log
+/workspace/build-logs/h100-restore-after-splitn-allpackages-20260518-204333.log
+```
+
+Hypothesis: the production `128x256x128` mine kernel may be register-limited by
+the 256-column WGMMA accumulator. A mine-only specialization could compute the
+same proof-visible 256-column tile as two 128-column strips, XOR the strip
+reductions into the same transcript, and keep less accumulator state live.
+
+Two variants were tried:
+
+| Variant | Build result | Resource result | Decision |
+|---|---|---|---|
+| simultaneous split-N | compiled | `REG:160 STACK:64` | reject: both half accumulators stayed live, so no register relief |
+| sequential split-N | compiled | `REG:160 STACK:128` | reject before benchmark: no register relief and worse stack |
+
+The sequential variant changed the producer to load the K pipeline twice and
+the consumer to run one 128-column accumulator at a time, then XOR the two
+16-word transcripts together. This was the version that should have reduced the
+limiting live accumulator footprint if split-N were enough. It did not: the
+production mine symbol remained in the same `REG:160` resource class, and stack
+usage doubled from `64` to `128`.
+
+Decision: do not benchmark or ship split-N. It adds memory/pipeline work and
+does not move the register cliff. The accumulator alone is not the simple
+compiler-visible limiter; the remaining live state appears tied to the selected
+WGMMA atom/thread mapping and transcript/check path as a whole. The known-good
+kernel was restored on the pod.
+
 ## 2026-05-18 Streaming XOR Live-State Probe
 
 Pod artifacts:
