@@ -264,6 +264,53 @@ Rank 64 would need a very large additional kernel win just to catch up with the
 current production chance-weighted rate. Do not pursue unless a separate R64
 kernel architecture emerges.
 
+## 2026-05-18 Producer-Consumer Mine-Only Pipeline Probe
+
+Pod artifacts:
+
+```text
+/workspace/build-logs/h100-pc-allpackages-20260518-104347.log
+/workspace/build-logs/h100-pc-nom192-allpackages-20260518-105341.log
+/workspace/sweeps/h100-pc-prod-tile-20260518-110225.log
+```
+
+We tested the remaining architecture-level shortcut from the Hopper/CUTLASS
+pipeline research: remove the dedicated producer warpgroup in the mine-only
+kernel and make the MMA warpgroups participate as `ProducerConsumer` users of
+`PipelineTmaAsync`. The goal was to eliminate the 128-thread producer warpgroup
+from headless mining and see whether a self-loading mainloop could unlock larger
+tile-M shapes.
+
+The first build with `192x256x128` in the normal matmul grid failed because the
+generator also instantiates the full `run_pearl_gemm_` path. That full GEMM path
+still keeps the warp-specialized producer warpgroup and hit the known PTXAS
+register failure:
+
+```text
+ptxas fatal: (C7602) Insufficient registers (128)
+Try to compile with register target of 154 or higher.
+```
+
+After removing `m192`, the producer-consumer kernel built and passed the
+forced-win pattern inspector for the production tile:
+
+```text
+PATTERN_COMPATIBLE=true
+rows=[0, 8]
+cols=[0, 1, 8, 9, ..., 248, 249]
+```
+
+Runtime result:
+
+| Variant | Validation | Normalized attempts/s | Delta vs production | Decision |
+|---|---|---:|---:|---|
+| `128x256x128 c2x1 regs160` producer-consumer | pattern-compatible, then CUDA launch failure after 80 matmuls | 451,106 | -31.3% | reject |
+
+The known-good production miner was restarted immediately and returned to
+`~657k` normalized attempts/s. Decision: revert the producer-consumer kernel.
+The lost TMA/WGMMA overlap is larger than the saved producer warpgroup overhead,
+so a self-loading mainloop is not a viable shortcut to a mining win.
+
 ## 2026-05-18 H100 PoW Hot-Path Micro-Optimizations
 
 Pod artifacts:

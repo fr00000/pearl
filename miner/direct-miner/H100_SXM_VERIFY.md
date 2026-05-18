@@ -189,6 +189,44 @@ runtime probe with the already-compiled `R64 c1x1` kernel reached only about
 `17.66B` chance-weighted/s versus the current production `~21.52B/s`. Rank 64
 does not look competitive without a separate large kernel win.
 
+### 2026-05-18 producer-consumer mine-only pipeline probe
+
+Pod artifacts:
+
+```text
+/workspace/build-logs/h100-pc-allpackages-20260518-104347.log
+/workspace/build-logs/h100-pc-nom192-allpackages-20260518-105341.log
+/workspace/sweeps/h100-pc-prod-tile-20260518-110225.log
+```
+
+We tried a larger mine-only kernel rewrite: route headless mining through a
+producer-consumer TMA mainloop where the MMA warpgroups issue their own loads
+instead of reserving a separate producer warpgroup. This was meant to test
+whether the 128 producer threads are the real ceiling for larger tile-M shapes.
+
+The first build with `192x256x128` in the normal matmul grid failed because the
+build generator also instantiates the full `run_pearl_gemm_` path, which still
+uses the warp-specialized producer warpgroup and hit the known PTXAS
+`register target of 154 or higher` failure. After removing `m192`, the
+producer-consumer production tile built and passed the forced-win pattern
+inspector:
+
+```text
+PATTERN_COMPATIBLE=true
+rows=[0, 8]
+cols=[0, 1, 8, 9, ..., 248, 249]
+```
+
+Benchmark result:
+
+| Variant | Validation | Normalized attempts/s | Delta |
+|---|---|---:|---:|
+| `128x256x128 s3 c2x1 regs160` producer-consumer | pattern-compatible, then CUDA launch failure after 80 matmuls | 451,106 | -31.3% |
+
+Decision: reject and revert. Losing warp-specialized overlap costs far more
+than the saved producer warpgroup. The known-good production miner was restarted
+immediately and returned to `~657k` normalized attempts/s.
+
 ### 2026-05-18 PoW hot-path micro-optimizations
 
 Pod artifacts:
