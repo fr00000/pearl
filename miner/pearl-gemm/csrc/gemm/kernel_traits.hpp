@@ -67,7 +67,7 @@ struct KernelTraits {
   static constexpr int kNumWarps = kNumThreads / cutlass::NumThreadsPerWarp;
   static constexpr int DefaultMmaRegisters =
       UseOneProducerWarp
-          ? 154
+          ? 160
           : kNumWarps == 8 ? 256 : kNumWarps == 12 ? 240 : kNumWarps == 16 ? 160
                                                                             : 112;
   static constexpr int MmaRegisters =
