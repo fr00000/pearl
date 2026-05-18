@@ -29,6 +29,7 @@ SHAPE_K="${SHAPE_K:-32768}"
 MAX_IN_FLIGHT="${MAX_IN_FLIGHT:-4}"
 GPU_INDEX="${GPU_INDEX:-0}"
 DURATION_S="${DURATION_S:-300}"
+VARIANT_FILTER="${VARIANT_FILTER:-}"
 
 OUTDIR="/workspace/sweeps/kernel-h100-$(date +%Y%m%d-%H%M%S)"
 SUMMARY="$OUTDIR/summary.csv"
@@ -73,10 +74,17 @@ echo "Shape: m=$SHAPE_M n=$SHAPE_N k=$SHAPE_K"
 echo "max_in_flight: $MAX_IN_FLIGHT"
 echo "duration/cell: ${DURATION_S}s"
 echo "variants: ${#VARIANTS[@]}"
+if [[ -n "$VARIANT_FILTER" ]]; then
+    echo "variant filter: $VARIANT_FILTER"
+fi
 echo ""
 
 for entry in "${VARIANTS[@]}"; do
     IFS='|' read -r variant_id tile_m tile_n tile_k stages cluster_m cluster_n mma_registers notes <<< "$entry"
+    if [[ -n "$VARIANT_FILTER" ]] && [[ ! "$variant_id" =~ $VARIANT_FILTER ]]; then
+        continue
+    fi
+
     log="$OUTDIR/${variant_id}.log"
     pattern_log="$OUTDIR/${variant_id}.pattern.log"
 
