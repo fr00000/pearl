@@ -5,6 +5,7 @@
 #include "cutlass/gemm/collective/collective_builder.hpp"
 
 #include <cutlass/arch/arch.h>
+#include "blake3/blake3_constants.hpp"
 #include "cutlass/cutlass.h"
 #include "cutlass/layout/layout.h"
 #include "cutlass/numeric_types.h"
@@ -67,6 +68,9 @@ struct KernelTraits {
   static constexpr int MmaRegisters =
       MmaRegistersRequested == 0 ? DefaultMmaRegisters : MmaRegistersRequested;
   static_assert(MmaRegisters >= 24 && MmaRegisters <= 256);
+  static constexpr bool UseSharedTranscript = MineOnly && bM >= 192;
+  static constexpr int kSharedTranscriptWords =
+      UseSharedTranscript ? kNumMmaThreads * blake3::MSG_BLOCK_SIZE_U32 : 1;
 
   using TileShape_MNK = Shape<Int<bM>, Int<bN>, Int<bK>>;
   // used for denoising
@@ -285,6 +289,9 @@ struct KernelTraits {
                           cutlass::detail::alignment_for_swizzle(SmemLayoutB{})>
           smem_B;
     };
+
+    cute::array_aligned<uint32_t, kSharedTranscriptWords, 128>
+        smem_transcript;
 
     typename MainloopPipeline::SharedStorage pipeline;
   };

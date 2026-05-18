@@ -213,10 +213,21 @@ for cM, cN, mma_registers in [
         mma_registers=mma_registers,
     )
 
-# Keep the headless-only grid available for targeted research probes, but do
-# not compile any extra mine-only configs by default. The 2026-05-18 H100
-# wide-M probes showed that 192x256 and 256x256 need a deeper accumulator
-# live-state reduction before they can pass PTXAS register allocation.
+# Headless-only wide-M register-pressure probes. These stay out of the ordinary
+# GEMM switch and use shared-memory transcript storage so we can test whether
+# removing the 16-word transcript from the live register set lets 192x256 fit
+# under the 128-register/thread cap for 512-thread CTAs.
+for cM, cN in [(1, 1), (2, 1)]:
+    _add_mine_only_matmul_kernel(
+        tile_size_m=192,
+        tile_size_n=256,
+        tile_size_k=128,
+        R=128,
+        pipeline_stages=3,
+        cM=cM,
+        cN=cN,
+        mma_registers=128,
+    )
 
 # Noising A: 64x64, fp16/int32
 _noising_a_kernels = [

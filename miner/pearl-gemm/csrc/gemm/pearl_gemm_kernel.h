@@ -208,10 +208,6 @@ __global__ void __launch_bounds__(
 
     int consumer_tix = static_cast<int>(threadIdx.x) - NumCopyThreads;
 
-    // Reduction parameters
-    bool local_block_found = 0;
-    int block_found_k_tile = 0;
-
     collective_mainloop.mma_init();
 
     WorkTileInfo work_tile_info = scheduler.get_initial_work(scheduler_params);
@@ -234,12 +230,11 @@ __global__ void __launch_bounds__(
               scheduler_params);
 
       collective_mainloop.mma(mainloop_params, pipeline, smem_pipe_read, tCrC,
-                              transcript_extraction_tensor, local_block_found,
-                              block_found_k_tile, consumer_tix, shared_storage,
-                              k_tile_count);
+                              transcript_extraction_tensor, consumer_tix,
+                              shared_storage, k_tile_count);
 
       if constexpr (!SkipReduction) {
-        local_block_found =
+        bool const local_block_found =
             check_pow_target<KTraits::EnablePowDiagnostics>(
                 transcript_extraction_tensor, mainloop_params.ptr_pow_target,
                 mainloop_params.ptr_pow_key, mainloop_params.pow_diagnostics,
@@ -385,42 +380,66 @@ __global__ void __launch_bounds__(
     typename KTraits::TiledMma tiled_mma;
     PipelineState smem_pipe_read;
     int consumer_tix = static_cast<int>(threadIdx.x) - NumCopyThreads;
-    bool local_block_found = 0;
-    int block_found_k_tile = 0;
 
     collective_mainloop.mma_init();
 
     WorkTileInfo work_tile_info = scheduler.get_initial_work(scheduler_params);
     CUTLASS_PRAGMA_NO_UNROLL
     while (work_tile_info.is_valid(scheduler_params)) {
-      Tensor tCrC = partition_fragment_C(tiled_mma, select<0, 1>(TileShape_MNK{}));
+      Tensor tCrC =
+          partition_fragment_C(tiled_mma, select<0, 1>(TileShape_MNK{}));
       clear(tCrC);
-
-      auto transcript_extraction_tensor =
-          make_tensor<uint32_t>(Int<blake3::MSG_BLOCK_SIZE_U32>{});
-      clear(transcript_extraction_tensor);
 
       cute::tuple<int32_t, int32_t, int32_t> block_coord =
           work_tile_info.template get_block_coord<ClusterShape>(
               scheduler_params);
 
-      collective_mainloop.mma(mainloop_params, pipeline, smem_pipe_read, tCrC,
-                              transcript_extraction_tensor, local_block_found,
-                              block_found_k_tile, consumer_tix, shared_storage,
-                              k_tile_count);
+      if constexpr (KTraits::UseSharedTranscript) {
+        auto transcript_extraction_tensor = make_tensor(
+            make_smem_ptr(shared_storage.smem_transcript.data() +
+                          consumer_tix * blake3::MSG_BLOCK_SIZE_U32),
+            Int<blake3::MSG_BLOCK_SIZE_U32>{});
+        clear(transcript_extraction_tensor);
 
-      local_block_found =
-          check_pow_target<KTraits::EnablePowDiagnostics>(
-              transcript_extraction_tensor, mainloop_params.ptr_pow_target,
-              mainloop_params.ptr_pow_key, mainloop_params.pow_diagnostics,
-              block_coord, consumer_tix);
+        collective_mainloop.mma(mainloop_params, pipeline, smem_pipe_read, tCrC,
+                                transcript_extraction_tensor, consumer_tix,
+                                shared_storage, k_tile_count);
 
-      if (local_block_found) {
-        write_host_signal_header<typename KTraits::TiledMma, TileShape_MNK>(
-            mainloop_params.host_signal_sync,
-            mainloop_params.host_signal_header_pinned,
-            mainloop_params.problem_shape, block_coord, consumer_tix,
-            mainloop_params.ptr_pow_target);
+        bool const local_block_found =
+            check_pow_target<KTraits::EnablePowDiagnostics>(
+                transcript_extraction_tensor, mainloop_params.ptr_pow_target,
+                mainloop_params.ptr_pow_key, mainloop_params.pow_diagnostics,
+                block_coord, consumer_tix);
+
+        if (local_block_found) {
+          write_host_signal_header<typename KTraits::TiledMma, TileShape_MNK>(
+              mainloop_params.host_signal_sync,
+              mainloop_params.host_signal_header_pinned,
+              mainloop_params.problem_shape, block_coord, consumer_tix,
+              mainloop_params.ptr_pow_target);
+        }
+      } else {
+        auto transcript_extraction_tensor =
+            make_tensor<uint32_t>(Int<blake3::MSG_BLOCK_SIZE_U32>{});
+        clear(transcript_extraction_tensor);
+
+        collective_mainloop.mma(mainloop_params, pipeline, smem_pipe_read, tCrC,
+                                transcript_extraction_tensor, consumer_tix,
+                                shared_storage, k_tile_count);
+
+        bool const local_block_found =
+            check_pow_target<KTraits::EnablePowDiagnostics>(
+                transcript_extraction_tensor, mainloop_params.ptr_pow_target,
+                mainloop_params.ptr_pow_key, mainloop_params.pow_diagnostics,
+                block_coord, consumer_tix);
+
+        if (local_block_found) {
+          write_host_signal_header<typename KTraits::TiledMma, TileShape_MNK>(
+              mainloop_params.host_signal_sync,
+              mainloop_params.host_signal_header_pinned,
+              mainloop_params.problem_shape, block_coord, consumer_tix,
+              mainloop_params.ptr_pow_target);
+        }
       }
 
       work_tile_info = scheduler.template get_next_work</*IsProducer=*/false>(

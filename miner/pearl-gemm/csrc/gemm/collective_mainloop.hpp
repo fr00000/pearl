@@ -252,7 +252,6 @@ struct CollectiveMainloop {
                           MainloopPipeline pipeline,
                           PipelineState& smem_pipe_read, FrgTensorC& tCrC,
                           TranscriptTensor& transcript_extraction_tensor,
-                          bool& block_found, int& block_found_k_tile,
                           int thread_idx, SharedStorage& shared_storage,
                           int k_tile_count) {
 
