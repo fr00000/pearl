@@ -524,6 +524,115 @@ copies are all too small to produce a meaningful coin-rate jump. Future work
 should focus on changing the live accumulator/transcript structure inside the
 mine kernel, not on surrounding launch or preprocessing work.
 
+### 32 GiB B Production Profile Confirmation
+
+Pod artifacts:
+
+```text
+/workspace/profiles/h100-prod-nsys-short-20260518-193346/nsys_h100_direct.nsys-rep
+/workspace/profiles/h100-prod-nsys-short-20260518-193346/nsys_cuda_gpu_kern_sum.txt
+/workspace/logs/direct-miner-h100-prod-n1048576-k32768-after-nsys-short-20260518-193425.log
+```
+
+We reran Nsight Systems at the promoted 32 GiB B shape
+(`8192x1048576x32768`) after the B-cache reuse change. Nsight Compute was
+again blocked by RunPod's performance-counter permission gate, and the profiling
+script now wraps `ncu` in a timeout so this failure cannot strand a profiled
+miner process.
+
+The short profile completed 72 matmuls in 28.4 seconds:
+
+```text
+normalized_attempt_rate=663,491/s
+chance_weighted_rate=21,741,278,506/s
+```
+
+Kernel-time summary:
+
+| GPU kernel group | Total GPU time | Share | Avg per launch | Instances |
+|---|---:|---:|---:|---:|
+| `hopper_mine_ws` | 28.26 s | 99.0% | 392.49 ms | 72 |
+| PyTorch int8 random A generation | 0.15 s | 0.5% | 1.43 ms | 105 |
+| `MerkleTreeRootsKernel` | 0.07 s | 0.2% | 0.89 ms | 74 |
+| `NoisingKernelB` | 0.04 s | 0.1% | 41.24 ms | 1 |
+| `NoisingKernelA` | 0.03 s | 0.1% | 0.43 ms | 72 |
+
+Decision: the promoted 32 GiB B shape has the same conclusion as the earlier
+8 GiB profile, only more strongly: the only remaining large target is
+`hopper_mine_ws`. Surrounding kernels are below 1% combined in steady state.
+
+### Structured Sparsity Moonshot Check
+
+Pod command:
+
+```bash
+uv run python miner/direct-miner/scripts/inspect_noised_sparsity.py \
+  --m 256 --n 512 --k 1024 --rank 128 --cluster-m 2 --cluster-n 1
+```
+
+Hypothesis: because direct mining controls synthetic A and B, raw 2:4 sparse
+matrices might allow use of NVIDIA sparse Tensor Cores for up to a 2x math-side
+gain.
+
+Result: rejected for the current protocol semantics. Raw A and B can be made
+exactly 2:4 sparse, but Pearl mines the noised operands (`ApEA` and `BpEB`),
+and noising destroys the sparse structure:
+
+| Tensor | Zero fraction | 2:4 valid groups | Exact 2:4 groups | Mean nonzeros per 4 |
+|---|---:|---:|---:|---:|
+| raw A | 50.00% | 100.00% | 100.00% | 2.000 |
+| raw B | 50.00% | 100.00% | 100.00% | 2.000 |
+| noised `ApEA` | 1.14% | 0.082% | 0.078% | 3.954 |
+| noised `BpEB` | 1.14% | 0.082% | 0.082% | 3.955 |
+
+Decision: do not build a sparse Tensor Core kernel for the current miner. It
+would have to multiply dense noised operands, so raw synthetic sparsity does not
+translate into sparse hardware speed. Reviving this path would require a much
+harder proof that A/B can be chosen so `A + EAL*EAR` and `B + EBL*EBR` remain
+2:4 sparse under a template-dependent random noise key, without collapsing
+ticket entropy. That is not a near-term coin-rate path.
+
+### Rank-Tile Mine Fast-Path Probe
+
+Pod artifacts:
+
+```text
+/workspace/build-logs/h100-ranktile-fastpath-allpackages-20260518-193902.log
+/workspace/logs/direct-miner-h100-prod-n1048576-k32768-ranktile-fastpath-bench-20260518-194832.log
+/workspace/build-logs/h100-restore-after-ranktile-fastpath-allpackages-20260518-195157.log
+```
+
+Hypothesis: for the production mine-only kernel, `tile_k == R == 128`, so the
+generic `TileHashAccumulator` only reduces once per 128-wide k tile. We tested
+a specialized mainloop path that updates the transcript word directly at the
+last WGMMA k-block instead of calling the generic accumulator on every k-block.
+
+Correctness gate: passed. The forced-win pattern inspector remained compatible:
+
+```text
+PATTERN_COMPATIBLE=true
+rows=[0, 8]
+cols=[0, 1, 8, 9, ..., 248, 249]
+```
+
+Runtime result at the promoted 32 GiB B H100 shape:
+
+| Variant | Progress line | Normalized attempts/s | Delta vs restored production band | Decision |
+|---|---:|---:|---:|---|
+| rank-tile fast path | 100 completions | 648,506 | -2.0% to -2.2% | reject |
+| rank-tile fast path | 200 completions | 651,915 avg / 655,360 interval | -1.1% to -1.7% | reject |
+
+The timeout final line underreported throughput because shutdown spent time
+draining callbacks; the steady progress lines are the relevant comparison. The
+specialized path was still below the restored production band of roughly
+`661k-663k` normalized attempts/s, so it was reverted and the known-good
+`pearl-gemm` build was restored on the pod.
+
+Decision: keep the generic `TileHashAccumulator`. The compiler/runtime are
+already handling this case well enough that the explicit fast path loses
+throughput, likely by perturbing scheduling/register allocation rather than
+removing a true bottleneck.
+
 ## 2026-05-18 Streaming XOR Live-State Probe
 
 Pod artifacts:

@@ -28,6 +28,9 @@ SHAPE_K="${SHAPE_K:-32768}"
 MAX_IN_FLIGHT="${MAX_IN_FLIGHT:-4}"
 GPU_INDEX="${GPU_INDEX:-0}"
 DURATION_S="${DURATION_S:-75}"
+NSYS_KILL_AFTER_S="${NSYS_KILL_AFTER_S:-180}"
+RUN_NCU="${RUN_NCU:-auto}"
+NCU_TIMEOUT_S="${NCU_TIMEOUT_S:-180}"
 KERNEL_TILE_M="${KERNEL_TILE_M:-128}"
 KERNEL_TILE_N="${KERNEL_TILE_N:-256}"
 KERNEL_TILE_K="${KERNEL_TILE_K:-128}"
@@ -63,11 +66,12 @@ echo "Shape: m=$SHAPE_M n=$SHAPE_N k=$SHAPE_K mif=$MAX_IN_FLIGHT"
 echo "Kernel: ${KERNEL_TILE_M}x${KERNEL_TILE_N}x${KERNEL_TILE_K} stages=${KERNEL_STAGES} cluster=${KERNEL_CLUSTER_M}x${KERNEL_CLUSTER_N} regs=${KERNEL_MMA_REGISTERS} swizzle=${KERNEL_SWIZZLE}"
 echo ""
 
-if command -v ncu > /dev/null; then
+if [[ "$RUN_NCU" != "0" ]] && command -v ncu > /dev/null; then
     echo "Running Nsight Compute single-kernel probe..."
     CUDA_VISIBLE_DEVICES="$GPU_INDEX" \
     LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
     MINER_DEBUG=true \
+    timeout --signal=SIGINT --kill-after=30 "$NCU_TIMEOUT_S" \
     ncu --target-processes all \
         --kernel-name-base demangled \
         --kernel-name 'regex:.*hopper_mine_ws.*' \
@@ -88,7 +92,7 @@ if command -v ncu > /dev/null; then
         echo "ncu did not complete. This is expected on many RunPod hosts when GPU counters are restricted."
     fi
 else
-    echo "ncu not found; skipping Nsight Compute."
+    echo "ncu disabled or not found; skipping Nsight Compute."
 fi
 
 echo ""
@@ -97,7 +101,7 @@ if command -v nsys > /dev/null; then
     CUDA_VISIBLE_DEVICES="$GPU_INDEX" \
     LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
     MINER_DEBUG=true \
-    timeout --signal=SIGINT --kill-after=30 "$DURATION_S" \
+    timeout --signal=SIGINT --kill-after="$NSYS_KILL_AFTER_S" "$DURATION_S" \
     nsys profile \
         --trace=cuda,nvtx \
         --sample=none \
