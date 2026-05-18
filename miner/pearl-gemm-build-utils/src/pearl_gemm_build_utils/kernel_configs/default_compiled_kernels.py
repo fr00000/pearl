@@ -128,6 +128,68 @@ for cM, cN in [(1, 1), (2, 1)]:
             mma_registers=mma_registers,
         )
 
+# Second H100 mining grid. These variants preserve the default 256-column proof
+# pattern while changing the CTA work shape enough to test genuine kernel-side
+# ceilings at the current production shape (8192x262144x32768).
+#
+# - 128x256x128 stages=2 checks whether the production kernel is over-buffered
+#   now that the main path is mine-only and writes no C tile.
+# - 128x256x256 stages=2 halves the number of mainloop K tiles and transcript
+#   writeback points at the same problem K, trading more shared memory per stage
+#   for less loop/control overhead.
+# - 256x256x128 uses four MMA warpgroups per CTA. Normalized attempts per
+#   matmul are comparable to 128x256, but the larger CTA may improve or hurt
+#   TMA reuse and scheduling; measure rather than assume.
+for pipeline_stages, cM, cN, mma_registers in [
+    (2, 1, 1, 0),
+    (2, 2, 1, 160),
+    (2, 2, 1, 192),
+]:
+    _add_matmul_kernel(
+        tile_size_m=128,
+        tile_size_n=256,
+        tile_size_k=128,
+        R=128,
+        pipeline_stages=pipeline_stages,
+        cM=cM,
+        cN=cN,
+        mma_registers=mma_registers,
+    )
+
+for cM, cN, mma_registers in [
+    (1, 1, 0),
+    (2, 1, 160),
+    (2, 1, 192),
+]:
+    _add_matmul_kernel(
+        tile_size_m=128,
+        tile_size_n=256,
+        tile_size_k=256,
+        R=128,
+        pipeline_stages=2,
+        cM=cM,
+        cN=cN,
+        mma_registers=mma_registers,
+    )
+
+for cM, cN, mma_registers in [
+    (1, 1, 0),
+    (1, 1, 96),
+    (1, 1, 112),
+    (2, 1, 96),
+    (2, 1, 112),
+]:
+    _add_matmul_kernel(
+        tile_size_m=256,
+        tile_size_n=256,
+        tile_size_k=128,
+        R=128,
+        pipeline_stages=3,
+        cM=cM,
+        cN=cN,
+        mma_registers=mma_registers,
+    )
+
 # Noising A: 64x64, fp16/int32
 _noising_a_kernels = [
     NoisingAKernelConfig(

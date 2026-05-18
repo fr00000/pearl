@@ -24,8 +24,8 @@ if pgrep -f "/\.venv/bin/direct-miner" > /dev/null; then
 fi
 
 SHAPE_M="${SHAPE_M:-8192}"
-SHAPE_N="${SHAPE_N:-524032}"
-SHAPE_K="${SHAPE_K:-8192}"
+SHAPE_N="${SHAPE_N:-262144}"
+SHAPE_K="${SHAPE_K:-32768}"
 MAX_IN_FLIGHT="${MAX_IN_FLIGHT:-4}"
 GPU_INDEX="${GPU_INDEX:-0}"
 DURATION_S="${DURATION_S:-300}"
@@ -46,6 +46,9 @@ VARIANTS=(
     "prod_regs160|128|256|128|3|2|1|160|register_confirm"
     "prod_regs192|128|256|128|3|2|1|192|register_confirm"
     "prod_regs224|128|256|128|3|2|1|224|register_confirm"
+    "prod_s2_c1x1|128|256|128|2|1|1||stage2_probe"
+    "prod_s2_c2x1_regs160|128|256|128|2|2|1|160|stage2_probe"
+    "prod_s2_c2x1_regs192|128|256|128|2|2|1|192|stage2_probe"
     "s3_c1x1|128|256|128|3|1|1||cluster_stage"
     "s3_c1x2|128|256|128|3|1|2||cluster_stage"
     "s3_c2x2|128|256|128|3|2|2||cluster_stage"
@@ -57,8 +60,16 @@ VARIANTS=(
     "k64_s3_c1x1|128|256|64|3|1|1||tile_k_probe"
     "k64_s3_c2x1|128|256|64|3|2|1||tile_k_probe"
     "k64_s4_c2x1|128|256|64|4|2|1||tile_k_probe"
+    "k256_s2_c1x1|128|256|256|2|1|1||tile_k_probe"
+    "k256_s2_c2x1_regs160|128|256|256|2|2|1|160|tile_k_probe"
+    "k256_s2_c2x1_regs192|128|256|256|2|2|1|192|tile_k_probe"
     "m64_s3_c1x1|64|256|128|3|1|1||normalization_guard"
     "m64_s3_c2x1|64|256|128|3|2|1||normalization_guard"
+    "m256_s3_c1x1|256|256|128|3|1|1||tile_m_probe"
+    "m256_s3_c1x1_regs96|256|256|128|3|1|1|96|tile_m_probe"
+    "m256_s3_c1x1_regs112|256|256|128|3|1|1|112|tile_m_probe"
+    "m256_s3_c2x1_regs96|256|256|128|3|2|1|96|tile_m_probe"
+    "m256_s3_c2x1_regs112|256|256|128|3|2|1|112|tile_m_probe"
 )
 
 echo "Kernel sweep output: $OUTDIR"
