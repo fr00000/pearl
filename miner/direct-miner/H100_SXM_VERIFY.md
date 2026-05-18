@@ -102,6 +102,38 @@ The buildable quick cells all lost to production:
 Decision: keep the current production kernel. The simple config space around
 pipeline stages, `tile_k`, and register cap is exhausted for this shape.
 
+### 2026-05-18 PoW hot-path micro-optimizations
+
+Pod artifacts:
+
+```text
+/workspace/build-logs/h100-deep-blake3-uv-sync-20260518-072234.log
+/workspace/build-logs/h100-deep-blake3-fix-uv-sync-20260518-073608.log
+/workspace/sweeps/kernel-h100-20260518-074958/summary.csv
+/workspace/build-logs/h100-deep-pow-smem-uv-sync-20260518-075247.log
+/workspace/sweeps/kernel-h100-20260518-080540/summary.csv
+```
+
+Two deeper `hopper_mine_ws` micro-optimizations were tested after the
+second-pass launch grid:
+
+| Experiment | Correctness | Normalized attempts/s | Delta vs `656,523/s` reference | Decision |
+|---|---|---:|---:|---|
+| Scheduled single-block keyed BLAKE3 PoW compressor | Python `blake3` byte-match plus pattern-compatible | 656,122 | -0.06% | reject |
+| Shared-memory PoW key/target staging | pattern-compatible | 656,976 | +0.07% | neutral, reverted |
+
+Both stayed in the same static resource class for the explicit production
+`regs160` kernel:
+
+```text
+REG:160 STACK:64 SHARED:1024 LOCAL:0 CONSTANT[0]:1136
+```
+
+Decision: no production change. The final PoW BLAKE3 scheduling and tiny
+key/target global loads are not measurable H100 bottlenecks at the current
+shape. Future work should target the accumulator/WGMMA mainloop or a true
+mine-only pipeline rewrite.
+
 ### 2026-05-17 register/swizzle confirmation
 
 Pod artifacts:

@@ -151,6 +151,59 @@ swizzle8` kernel remains the best H100 setting. The result also suggests the
 current pipeline is not over-buffered: cutting to two stages or doubling `tile_k`
 reduces throughput rather than freeing useful occupancy.
 
+## 2026-05-18 H100 PoW Hot-Path Micro-Optimizations
+
+Pod artifacts:
+
+```text
+/workspace/build-logs/h100-deep-blake3-uv-sync-20260518-072234.log
+/workspace/build-logs/h100-deep-blake3-fix-uv-sync-20260518-073608.log
+/workspace/sweeps/kernel-h100-20260518-074958/summary.csv
+/workspace/build-logs/h100-deep-pow-smem-uv-sync-20260518-075247.log
+/workspace/sweeps/kernel-h100-20260518-080540/summary.csv
+```
+
+After the launch-shape probes were exhausted, we tested two deeper
+`hopper_mine_ws` hot-path changes that do not alter proof semantics:
+
+1. A scheduled single-block keyed BLAKE3 compressor for PoW checks. This avoids
+   the generic compressor's mutable `rBlock` copy and per-round permutation
+   scratch by using the fixed BLAKE3 message schedule directly.
+2. A mine-only shared-memory copy of the 8-word PoW key and 8-word target, so
+   each consumer thread reads them from CTA shared memory instead of from the
+   tiny global tensors.
+
+Correctness gates:
+
+| Experiment | Correctness result |
+|---|---|
+| Scheduled BLAKE3 | CUDA helper matched Python `blake3` byte-for-byte for four random 64-byte blocks; forced-win pattern remained compatible |
+| Shared PoW key/target | Forced-win pattern remained compatible |
+
+Static resources for the production `regs160` mine kernel stayed in the same
+class:
+
+```text
+REG:160 STACK:64 SHARED:1024 LOCAL:0 CONSTANT[0]:1136
+```
+
+Quick 60-second production-shape results:
+
+| Experiment | Normalized attempts/s | Delta vs `656,523/s` reference | Decision |
+|---|---:|---:|---|
+| Scheduled BLAKE3 compressor | 656,122 | -0.06% | reject |
+| Shared PoW key/target | 656,976 | +0.07% | neutral, reverted |
+
+The scheduled BLAKE3 run reported log "errors" only because timeout interrupted
+the direct-miner shutdown drain; there were no CUDA errors or proof-pattern
+failures. The shared-memory key/target run had `errors=0`.
+
+Decision: no production change. These micro-optimizations do not move H100
+throughput outside short-run noise, which implies the bottleneck is not the
+generic BLAKE3 message permutation or tiny PoW key/target global loads. Further
+meaningful gains likely require changing the accumulator/WGMMA pipeline or
+reducing the live accumulator footprint, not polishing the final PoW compare.
+
 ## 2026-05-17 Post-Hash-Fix Wide-n Confirmation
 
 Pod artifacts:
