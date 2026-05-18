@@ -1109,3 +1109,47 @@ attempt count exactly matches the expected CTA/thread geometry, and the mean
 best observed hash is essentially equal to the random-hash expectation. Future
 kernel work can focus on speed rather than a suspected lottery-ticket
 correctness issue.
+
+## 2026-05-18 Narrow Proof-Pattern Sweep
+
+We tested whether a narrower `tile_n=128` proof pattern could beat the default
+`128x256` production kernel once scored by the full protocol-weighted chance
+rate. This matters because raw CTA/s is misleading when the proof pattern
+changes: `tile_n=128` produces a `cols_pattern` of 32 columns instead of the
+default 64, so each CTA has half the proof width and must run enough faster to
+compensate.
+
+Build notes:
+
+- Added research-only `128x128`, `192x128`, and `256x128` headless variants.
+- `320x128` and `384x128` were pruned after the H100 build hit the
+  `KTraits::kNumWarps` static assertion in `pearl_gemm_kernel.h`; those shapes
+  are outside the supported warp-count set.
+- The reduced grid built successfully on the H100 pod.
+
+Sweep location:
+
+```text
+/workspace/sweeps/h100-narrow-mtile-pruned/20260518-142955/summary.csv
+```
+
+Same-run comparison on the H100 pod:
+
+| Variant | Proof width | Protocol-weighted attempts/s | Delta vs baseline |
+|---|---:|---:|---:|
+| `128x256 c2x1 regs160` production baseline | 128 | 2.748T | reference |
+| `256x128 c1x1 regs96` | 64 | 2.582T | -6.1% |
+| `256x128 c2x1 regs96` | 64 | 2.609T | -5.1% |
+| `256x128 c1x1 regs112` | 64 | 2.587T | -5.9% |
+| `256x128 c2x1 regs112` | 64 | 2.627T | -4.4% |
+
+Earlier quick cells in the same branch also tested `128x128` and `192x128`;
+both were further behind once normalized by proof width. The best narrow
+candidate was `256x128 c2x1 regs112`, but it still lost to the production
+`128x256 c2x1 regs160` kernel by about 4.4%.
+
+Conclusion: do not switch production to a `tile_n=128` proof pattern. The
+narrow pattern raises raw matmul/CTA cadence, but the lost 32 columns of
+proof width more than cancel that gain. Keep the production settings at
+`tile_m=128`, `tile_n=256`, `tile_k=128`, `cluster=2x1`, `stages=3`,
+`mma_registers=160`.
