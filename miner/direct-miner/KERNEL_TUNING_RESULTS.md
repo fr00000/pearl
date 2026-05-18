@@ -1153,3 +1153,43 @@ narrow pattern raises raw matmul/CTA cadence, but the lost 32 columns of
 proof width more than cancel that gain. Keep the production settings at
 `tile_m=128`, `tile_n=256`, `tile_k=128`, `cluster=2x1`, `stages=3`,
 `mma_registers=160`.
+
+## 2026-05-18 Headless-Only Wide-M Compile Probe
+
+We split the build/dispatch grid so `mine_only` kernels can compile extra
+headless-only configs without also instantiating the ordinary GEMM/denoising
+template path. This lets future research probe mining-only shapes that are not
+valid or practical for full GEMM.
+
+Build change:
+
+- Ordinary GEMM dispatch still uses `MATMUL_CONFIG_SWITCH`.
+- Headless mining dispatch now uses `MINE_CONFIG_SWITCH`.
+- Normal matmul configs remain visible to both paths.
+- Extra `mine_only_matmul_kernels` generate separate `mine_*.cu` files and are
+  visible only to `mine_only` dispatch.
+
+Wide-M probes attempted on the H100 pod:
+
+| Variant family | Result |
+|---|---|
+| `192x256x128`, `stages=3`, `cluster=1x1/2x1`, `regs=160/192` | PTXAS failed: `Insufficient registers (128)`, target needs `154+` |
+| `256x256x128`, `stages=3`, `cluster=1x1/2x1`, `regs=160` | PTXAS failed: `Insufficient registers (96)`, target needs `154+` |
+
+Build log:
+
+```text
+/workspace/build-logs/h100-mine-only-wideM-parallel-20260518-144613.log
+```
+
+Conclusion: the previous wide-M compile blocker is not only in the full
+GEMM/denoise path. The headless `hopper_mine_ws` kernel itself still carries
+enough live state that `192x256` cannot fit under the 128-register/thread cap
+of a 512-thread CTA, and `256x256` is even further away under the 96-register
+cap of a 640-thread CTA.
+
+Do not compile wide-M probes by default. The next viable route is a real
+headless live-state reduction: reduce the mining kernel's per-thread state from
+about 154+ required registers to at most 128 for `192x256`. If that succeeds,
+`192x256` can be re-enabled through the new headless-only grid and benchmarked
+without touching the ordinary GEMM path.

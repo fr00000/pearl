@@ -213,28 +213,10 @@ for cM, cN, mma_registers in [
         mma_registers=mma_registers,
     )
 
-# Headless-only wide-M probes. The ordinary GEMM instantiation path cannot
-# compile these today because the denoising/C-output template carries extra
-# live state. Mine-only dispatch skips that path, so these test whether the
-# headless kernel can run wider CTAs and reduce scheduler/control overhead.
-for tile_size_m, cM, cN, mma_registers in [
-    (192, 1, 1, 160),
-    (192, 2, 1, 160),
-    (192, 1, 1, 192),
-    (192, 2, 1, 192),
-    (256, 1, 1, 160),
-    (256, 2, 1, 160),
-]:
-    _add_mine_only_matmul_kernel(
-        tile_size_m=tile_size_m,
-        tile_size_n=256,
-        tile_size_k=128,
-        R=128,
-        pipeline_stages=3,
-        cM=cM,
-        cN=cN,
-        mma_registers=mma_registers,
-    )
+# Keep the headless-only grid available for research probes, but do not compile
+# any extra mine-only configs by default. The 2026-05-18 H100 wide-M probe
+# showed that 192x256 and 256x256 need a live-state reduction before they can
+# pass PTXAS register allocation.
 
 # Noising A: 64x64, fp16/int32
 _noising_a_kernels = [
