@@ -18,7 +18,7 @@ if ! pgrep -f pearl-gateway > /dev/null; then
     exit 1
 fi
 
-if pgrep -f "/\.venv/bin/direct-miner" > /dev/null; then
+if pgrep -f "/\.venv/bin/direct-miner|python -m direct_miner" > /dev/null; then
     echo "ERROR: direct-miner already running. Stop it first."
     exit 1
 fi
@@ -154,9 +154,9 @@ for entry in "${VARIANTS[@]}"; do
     fi
 
     sleep 5
-    if pgrep -f "/\.venv/bin/direct-miner" > /dev/null; then
+    if pgrep -f "/\.venv/bin/direct-miner|python -m direct_miner" > /dev/null; then
         echo "  -> warning: direct-miner still running; force-killing"
-        pkill -9 -f "/\.venv/bin/direct-miner" 2>/dev/null
+        pkill -9 -f "/\.venv/bin/direct-miner|python -m direct_miner" 2>/dev/null
         sleep 3
     fi
 
