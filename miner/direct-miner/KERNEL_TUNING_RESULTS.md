@@ -1182,6 +1182,20 @@ Build log:
 /workspace/build-logs/h100-mine-only-wideM-parallel-20260518-144613.log
 ```
 
+After pruning those failing probe configs from the default grid, the H100 clone
+rebuilt successfully with the new split dispatch infrastructure:
+
+```text
+/workspace/build-logs/h100-mine-switch-pruned-parallel-20260518-145323.log
+```
+
+Runtime smoke also passed through the headless mine switch on the benchmark
+clone before the intentional `timeout` stopped it:
+
+```text
+/workspace/build-logs/h100-mine-switch-smoke-20260518-150124.log
+```
+
 Conclusion: the previous wide-M compile blocker is not only in the full
 GEMM/denoise path. The headless `hopper_mine_ws` kernel itself still carries
 enough live state that `192x256` cannot fit under the 128-register/thread cap
