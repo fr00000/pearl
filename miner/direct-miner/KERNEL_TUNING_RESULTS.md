@@ -1229,3 +1229,9 @@ Conclusion: the XOR tree temporaries are not the controlling register cliff.
 The 154+ register requirement is dominated by the WGMMA accumulator/transcript
 state around `tCrC`. Unlocking `192x256` needs a larger accumulator redesign,
 not a local hash-reduction tweak.
+
+After pruning the scalar probe, the final clean branch rebuilt successfully:
+
+```text
+/workspace/build-logs/h100-final-pruned-mine-switch-parallel-20260518-151145.log
+```
