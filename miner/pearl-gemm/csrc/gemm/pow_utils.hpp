@@ -115,24 +115,6 @@ CUTE_DEVICE uint32_t xor_reduction(const TensorType& input_tensor) {
   }
 }
 
-// Lower-register XOR reduction for wide mine-only probes. This is intentionally
-// simple: it avoids the tree's temporary arrays and trades some instruction-level
-// parallelism for a smaller live register footprint.
-template <typename TensorType>
-CUTE_DEVICE uint32_t xor_reduction_scalar(const TensorType& input_tensor) {
-  constexpr size_t buffer_size =
-      decltype(std::declval<TensorType>().size())::value;
-
-  static_assert(buffer_size > 0, "Buffer size must be positive");
-
-  uint32_t result = 0;
-  CUTLASS_PRAGMA_UNROLL
-  for (size_t i = 0; i < buffer_size; ++i) {
-    result ^= input_tensor[i];
-  }
-  return result;
-}
-
 /// Tile-based hash accumulator for register-optimized transcript updates.
 ///
 /// This struct preloads transcript elements into registers at tile start,
@@ -144,8 +126,7 @@ CUTE_DEVICE uint32_t xor_reduction_scalar(const TensorType& input_tensor) {
 ///   ReduceEveryK:   Reduction frequency (R / MMAAtom_K)
 ///   EnableDebug:    When true, atomicAdd to debug_counter on each reduction
 ///
-template <int KBlocksPerTile, int ReduceEveryK, bool EnableDebug = false,
-          bool UseScalarXorReduction = false>
+template <int KBlocksPerTile, int ReduceEveryK, bool EnableDebug = false>
 struct TileHashAccumulator {
   static constexpr int accums_per_tile =
       std::max<int>(1, KBlocksPerTile / ReduceEveryK);
@@ -194,12 +175,7 @@ struct TileHashAccumulator {
         atomicAdd((unsigned long long*)m_debug_counter, 1ULL);
       }
 
-      uint32_t hash;
-      if constexpr (UseScalarXorReduction) {
-        hash = xor_reduction_scalar(tensor);
-      } else {
-        hash = xor_reduction(tensor);
-      }
+      uint32_t hash = xor_reduction(tensor);
       const int idx = k_block / ReduceEveryK;
       m_tile_transcript[idx] =
           rotl_xor<HASH_ACCUMULATE_ROTATION>(m_tile_transcript[idx], hash);

@@ -1207,3 +1207,25 @@ headless live-state reduction: reduce the mining kernel's per-thread state from
 about 154+ required registers to at most 128 for `192x256`. If that succeeds,
 `192x256` can be re-enabled through the new headless-only grid and benchmarked
 without touching the ordinary GEMM path.
+
+### Scalar XOR Register Probe
+
+We tested whether the XOR tree in `pow_utils.hpp` was the live-register cliff.
+The probe replaced the wide-M mine-only hash reduction with a scalar XOR loop
+and re-enabled `192x256x128` at `mma_registers=128`, which is the maximum
+register target available to a 512-thread CTA.
+
+Build log:
+
+```text
+/workspace/build-logs/h100-scalar-xor-wideM-parallel-20260518-150527.log
+```
+
+Result: both `192x256` variants still failed PTXAS with
+`Insufficient registers (128)` and the same `Try to compile with register
+target of 154 or higher` message.
+
+Conclusion: the XOR tree temporaries are not the controlling register cliff.
+The 154+ register requirement is dominated by the WGMMA accumulator/transcript
+state around `tCrC`. Unlocking `192x256` needs a larger accumulator redesign,
+not a local hash-reduction tweak.

@@ -278,12 +278,10 @@ struct CollectiveMainloop {
     constexpr int k_blocks_per_tile = size<2>(tCrA);
     // R/32
     constexpr int reduce_every_k = get<2>(TileShape_MNR{}) / MMAAtom_K{};
-    constexpr bool use_scalar_xor_reduction =
-        KTraits::MineOnly && KTraits::bM >= 192;
 
     using HashAccumulator =
         TileHashAccumulator<k_blocks_per_tile, reduce_every_k,
-                            KTraits::EnableDebug, use_scalar_xor_reduction>;
+                            KTraits::EnableDebug>;
     HashAccumulator hash_accumulator(last_full_k_block,
                                      mainloop_params.inner_hash_counter);
 
