@@ -5,7 +5,6 @@
 #include "cutlass/gemm/collective/collective_builder.hpp"
 
 #include <cutlass/arch/arch.h>
-#include "blake3/blake3_constants.hpp"
 #include "cutlass/cutlass.h"
 #include "cutlass/layout/layout.h"
 #include "cutlass/numeric_types.h"
@@ -58,19 +57,22 @@ struct KernelTraits {
   // Use a 64 x bN tile per warpgroup; so thread count controlled by tile_size_m parameter
   static constexpr int kNumMmaWarpgroups = bM / 64;
   static constexpr int kNumMmaThreads = kNumMmaWarpgroups * 128;
-  // Use one warp in producer warpgroup for TMA
-  static constexpr int kNumProducerThreads = cutlass::NumThreadsPerWarp;
-  static constexpr int kNumThreads = kNumMmaThreads + 128;
+  // Wide mine-only probes use a single producer warp so the CTA thread count
+  // does not force PTXAS down to a 128-register cap.
+  static constexpr bool UseOneProducerWarp = MineOnly && bM >= 192;
+  static constexpr int kNumProducerThreads =
+      UseOneProducerWarp ? cutlass::NumThreadsPerWarp
+                         : cutlass::NumThreadsPerWarpGroup;
+  static constexpr int kNumThreads = kNumMmaThreads + kNumProducerThreads;
   static constexpr int kNumWarps = kNumThreads / cutlass::NumThreadsPerWarp;
   static constexpr int DefaultMmaRegisters =
-      kNumWarps == 8 ? 256 : kNumWarps == 12 ? 240 : kNumWarps == 16 ? 160
-                                                                      : 112;
+      UseOneProducerWarp
+          ? 154
+          : kNumWarps == 8 ? 256 : kNumWarps == 12 ? 240 : kNumWarps == 16 ? 160
+                                                                            : 112;
   static constexpr int MmaRegisters =
       MmaRegistersRequested == 0 ? DefaultMmaRegisters : MmaRegistersRequested;
   static_assert(MmaRegisters >= 24 && MmaRegisters <= 256);
-  static constexpr bool UseSharedTranscript = MineOnly && bM >= 192;
-  static constexpr int kSharedTranscriptWords =
-      UseSharedTranscript ? kNumMmaThreads * blake3::MSG_BLOCK_SIZE_U32 : 1;
 
   using TileShape_MNK = Shape<Int<bM>, Int<bN>, Int<bK>>;
   // used for denoising
@@ -289,9 +291,6 @@ struct KernelTraits {
                           cutlass::detail::alignment_for_swizzle(SmemLayoutB{})>
           smem_B;
     };
-
-    cute::array_aligned<uint32_t, kSharedTranscriptWords, 128>
-        smem_transcript;
 
     typename MainloopPipeline::SharedStorage pipeline;
   };

@@ -214,9 +214,9 @@ for cM, cN, mma_registers in [
     )
 
 # Headless-only wide-M register-pressure probes. These stay out of the ordinary
-# GEMM switch and use shared-memory transcript storage so we can test whether
-# removing the 16-word transcript from the live register set lets 192x256 fit
-# under the 128-register/thread cap for 512-thread CTAs.
+# GEMM switch and use a one-warp producer so 192x256 CTAs have 416 threads
+# instead of 512, raising PTXAS' register cap enough to test the 154-register
+# target it requested for this accumulator shape.
 for cM, cN in [(1, 1), (2, 1)]:
     _add_mine_only_matmul_kernel(
         tile_size_m=192,
@@ -226,7 +226,7 @@ for cM, cN in [(1, 1), (2, 1)]:
         pipeline_stages=3,
         cM=cM,
         cN=cN,
-        mma_registers=128,
+        mma_registers=154,
     )
 
 # Noising A: 64x64, fp16/int32
