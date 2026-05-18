@@ -39,11 +39,6 @@ def inner_hash(input_buffer: torch.Tensor, iterations: int = 1) -> torch.Tensor:
     return torch.ops.pearl_gemm.inner_hash(input_buffer, iterations)
 
 
-def blake3_single_block_keyed(block: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
-    """Compute one 64-byte keyed BLAKE3 block with the scheduled CUDA helper."""
-    return torch.ops.pearl_gemm.blake3_single_block_keyed(block, key)
-
-
 def tensor_hash(
     data: torch.Tensor, key: torch.Tensor, out: torch.Tensor, roots: torch.Tensor
 ) -> torch.Tensor:
