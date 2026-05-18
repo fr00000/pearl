@@ -10,6 +10,8 @@
 #include "cutlass/numeric_types.h"
 #include "cutlass/pipeline/pipeline.hpp"
 
+#include "blake3/blake3_constants.hpp"
+
 namespace pearl {
 using namespace cute;
 
@@ -285,6 +287,10 @@ struct KernelTraits {
                           cutlass::detail::alignment_for_swizzle(SmemLayoutB{})>
           smem_B;
     };
+
+    cute::array_aligned<uint32_t, blake3::CHAINING_VALUE_SIZE_U32> smem_pow_key;
+    cute::array_aligned<uint32_t, blake3::CHAINING_VALUE_SIZE_U32>
+        smem_pow_target;
 
     typename MainloopPipeline::SharedStorage pipeline;
   };

@@ -318,6 +318,13 @@ __global__ void __launch_bounds__(
     CollectiveMainloop::prefetch_tma_descriptors(mainloop_params);
   }
 
+  if (threadIdx.x < blake3::CHAINING_VALUE_SIZE_U32) {
+    shared_storage.smem_pow_key[threadIdx.x] =
+        mainloop_params.ptr_pow_key[threadIdx.x];
+    shared_storage.smem_pow_target[threadIdx.x] =
+        mainloop_params.ptr_pow_target[threadIdx.x];
+  }
+
   PipelineParams pipeline_params;
   pipeline_params.transaction_bytes = CollectiveMainloop::TmaTransactionBytes;
   int warp_group_idx = cutlass::canonical_warp_group_idx();
@@ -411,8 +418,8 @@ __global__ void __launch_bounds__(
 
       local_block_found =
           check_pow_target<KTraits::EnablePowDiagnostics>(
-              transcript_extraction_tensor, mainloop_params.ptr_pow_target,
-              mainloop_params.ptr_pow_key, mainloop_params.pow_diagnostics,
+              transcript_extraction_tensor, shared_storage.smem_pow_target.data(),
+              shared_storage.smem_pow_key.data(), mainloop_params.pow_diagnostics,
               block_coord, consumer_tix);
 
       if (local_block_found) {
@@ -420,7 +427,7 @@ __global__ void __launch_bounds__(
             mainloop_params.host_signal_sync,
             mainloop_params.host_signal_header_pinned,
             mainloop_params.problem_shape, block_coord, consumer_tix,
-            mainloop_params.ptr_pow_target);
+            shared_storage.smem_pow_target.data());
       }
 
       work_tile_info = scheduler.template get_next_work</*IsProducer=*/false>(
