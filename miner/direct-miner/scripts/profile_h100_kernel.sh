@@ -23,7 +23,7 @@ if pgrep -f "/\.venv/bin/direct-miner|python -m direct_miner" > /dev/null; then
 fi
 
 SHAPE_M="${SHAPE_M:-8192}"
-SHAPE_N="${SHAPE_N:-262144}"
+SHAPE_N="${SHAPE_N:-524288}"
 SHAPE_K="${SHAPE_K:-32768}"
 MAX_IN_FLIGHT="${MAX_IN_FLIGHT:-4}"
 GPU_INDEX="${GPU_INDEX:-0}"

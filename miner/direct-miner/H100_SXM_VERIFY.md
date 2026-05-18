@@ -12,12 +12,12 @@ Does the H200 stress sweep winner (`stress_n256` = 8192 × 262144 × 8192) carry
 
 ## Current production winner
 
-As of the 2026-05-18 equal-B K confirmation, the recommended H100 direct-miner
-command is:
+As of the 2026-05-18 large-B K32768 confirmation, the recommended H100
+direct-miner command is:
 
 ```bash
 uv run direct-miner \
-  --m 8192 --n 262144 --k 32768 \
+  --m 8192 --n 524288 --k 32768 \
   --max-in-flight 4 \
   --enable-b-cache \
   --enable-headless-kernel \
@@ -32,14 +32,43 @@ uv run direct-miner \
 ```
 
 Confirmed four-minute rate:
-**656,810 normalized attempts/s per GPU**, or **21,522,363,623
+**661,689 normalized attempts/s per GPU**, or **21,682,231,004
 chance-weighted units/s**. Because the protocol difficulty target scales by
 `h * w * rounded_common_dim`, the coin-rate comparison across different `k`
-values is `normalized_attempt_rate * k`; this setting is **+0.76%** versus the
-prior `8192 x 524288 x 16384` production shape in a same-session paired
-confirmation and about **+4.9% expected mining chance** versus the older
-`8192 x 524032 x 8192` production reference. The H100 startup script uses this
-shape and kernel tune by default.
+values is `normalized_attempt_rate * k`; this setting is **+0.81%** versus the
+prior `8192 x 262144 x 32768` production shape in a same-session paired
+confirmation. The H100 startup script uses this shape and kernel tune by
+default.
+
+### 2026-05-18 large-B K32768 confirmation
+
+Pod artifacts:
+
+```text
+/workspace/sweeps/h100-large-b-quick-20260518-163339/summary.csv
+/workspace/sweeps/h100-large-b-boundary-20260518-163944/summary.csv
+/workspace/sweeps/h100-large-b-confirm-20260518-164232/summary.csv
+```
+
+Quick spare-VRAM sweep:
+
+| Shape | B tensor | Final normalized attempts/s | Chance-weighted rate | Decision |
+|---|---:|---:|---:|---|
+| `8192 x 262144 x 32768` | 8 GiB | 655,999 | 21,495,766,659 | baseline |
+| `8192 x 524288 x 32768` | 16 GiB | 662,347 | 21,703,782,832 | confirm |
+| `8192 x 786432 x 32768` | 24 GiB | 662,840 | 21,719,931,129 | no material gain over 16 GiB |
+| `8192 x 1048576 x 32768` | 32 GiB | 548,152 | 17,961,854,260 | reject: OOM/retry churn |
+
+Four-minute confirmation:
+
+| Shape | B tensor | Final normalized attempts/s | Chance-weighted rate | Delta |
+|---|---:|---:|---:|---:|
+| `8192 x 262144 x 32768` | 8 GiB | 656,403 | 21,509,006,261 | baseline |
+| `8192 x 524288 x 32768` | 16 GiB | 661,689 | 21,682,231,004 | +0.81% |
+
+Decision: promote `8192 x 524288 x 32768`. The 16 GiB B tensor captures the
+larger-N gain without the 24 GiB/32 GiB memory pressure. The 32 GiB B shape
+repeatedly OOMs when allocating `BpEB`.
 
 ### 2026-05-18 equal-B K confirmation
 

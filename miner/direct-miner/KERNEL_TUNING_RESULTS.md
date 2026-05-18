@@ -10,7 +10,7 @@ benchmark notes live in `H100_SXM_VERIFY.md`.
 Keep the production direct-miner kernel at:
 
 ```bash
---m 8192 --n 262144 --k 32768 \
+--m 8192 --n 524288 --k 32768 \
 --max-in-flight 4 \
 --enable-b-cache \
 --enable-headless-kernel \
@@ -24,10 +24,11 @@ Keep the production direct-miner kernel at:
 --kernel-swizzle 8
 ```
 
-This is the H100-confirmed production setting after the 4 GiB tensor-hash fix
-and equal-B-memory K sweep. It keeps the same 8 GiB B tensor footprint as the
-prior `8192x524288x16384` setting but shifts work to `k=32768`, improving the
-chance-weighted mining rate by `+0.76%` in a same-session four-minute confirm.
+This is the H100-confirmed production setting after the 4 GiB tensor-hash fix,
+equal-B-memory K sweep, and large-B spare-VRAM confirmation. It uses a 16 GiB
+B tensor and keeps `k=32768`; the paired four-minute confirm measured
+`21,682,231,004` chance-weighted units/s, **+0.81%** versus the prior
+`8192x262144x32768` production shape.
 
 ## 2026-05-18 Persistent Scheduler Probe
 
@@ -124,10 +125,55 @@ Four-minute confirmation:
 | `8192x524288x16384` | 1,303,676 | 21,359,422,822 | baseline |
 | `8192x262144x32768` | 656,810 | 21,522,363,623 | +0.76% |
 
-Decision: promote `8192x262144x32768` for H100/Hopper production. It is a
-small but confirmed expected-coin-rate gain and uses the same B-cache footprint
-as the prior production shape. The A-slot pool grows because `k` doubles, but
-the H100 pod still has ample VRAM in this configuration.
+Decision at the time: promote `8192x262144x32768` for H100/Hopper production.
+It was a small but confirmed expected-coin-rate gain and used the same B-cache
+footprint as the prior production shape. The larger-B confirmation below
+supersedes this with `8192x524288x32768`.
+
+## 2026-05-18 Large-B K32768 Confirmation
+
+Pod artifacts:
+
+```text
+/workspace/sweeps/h100-large-b-quick-20260518-163339/summary.csv
+/workspace/sweeps/h100-large-b-boundary-20260518-163944/summary.csv
+/workspace/sweeps/h100-large-b-confirm-20260518-164232/summary.csv
+```
+
+After the `k=32768` shape was selected, the production H100 still had enough
+free VRAM to test larger fixed-B tensors. All cells used the same production
+kernel tune:
+
+```text
+m=8192
+k=32768
+max_in_flight=4
+B-cache enabled
+headless kernel enabled
+kernel=128x256x128 stages=3 cluster=2x1 regs=160 swizzle=8
+```
+
+Quick 85-second sweep:
+
+| Shape | B tensor | Normalized attempts/s | Chance-weighted rate | Decision |
+|---|---:|---:|---:|---|
+| `8192x262144x32768` | 8 GiB | 655,999 | 21,495,766,659 | baseline |
+| `8192x524288x32768` | 16 GiB | 662,347 | 21,703,782,832 | confirm |
+| `8192x786432x32768` | 24 GiB | 662,840 | 21,719,931,129 | no material gain over 16 GiB |
+| `8192x1048576x32768` | 32 GiB | 548,152 | 17,961,854,260 | reject: OOM/retry churn |
+
+Four-minute paired confirmation:
+
+| Shape | B tensor | Normalized attempts/s | Chance-weighted rate | Delta |
+|---|---:|---:|---:|---:|
+| `8192x262144x32768` | 8 GiB | 656,403 | 21,509,006,261 | baseline |
+| `8192x524288x32768` | 16 GiB | 661,689 | 21,682,231,004 | +0.81% |
+
+Decision: promote `8192x524288x32768` for H100 production. The 16 GiB B tensor
+captures almost all of the observed larger-N gain while leaving far more memory
+headroom than the 24 GiB/32 GiB boundary. The 32 GiB B shape is not viable with
+the current cache layout because it needs another 32 GiB `BpEB` allocation and
+falls into repeated OOM handling.
 
 ## 2026-05-18 H100 Second-Pass Kernel Probes
 
@@ -1284,3 +1330,9 @@ The practical research conclusion is now sharper: `192x256` needs a true
 live-state reduction in the MMA/mining path, not movement of hash scratch state
 or a smaller producer role. The dominant state is the WGMMA accumulator plus
 the transcript extraction state around `tCrC`.
+
+After pruning the one-producer probe, the H100 benchmark clone rebuilt cleanly:
+
+```text
+/workspace/build-logs/h100-pruned-one-producer-final-parallel-20260518-162706.log
+```
