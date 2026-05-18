@@ -112,6 +112,22 @@ tensor.
 Decision: keep the reuse path. It is a stability/allocator-pressure improvement
 rather than a measurable steady-state throughput gain.
 
+Rejected mine-only `MmaComplete` barrier skip:
+
+```text
+/workspace/logs/direct-miner-h100-prod-n1048576-k32768-skip-mmacomplete-20260518-184710.log
+```
+
+We tested skipping the final mainloop `MmaComplete` named-barrier arrive for
+mine-only kernels. Pattern inspection stayed compatible, but live throughput did
+not improve:
+
+| Shape | Kernel change | Normalized attempts/s at 2002 completions | Last interval attempts/s |
+|---|---|---:|---:|
+| `8192 x 1048576 x 32768` | skip mine-only `MmaComplete` arrive | 662,141 | 661,872 |
+
+Decision: reject the change. It is not a bottleneck at the promoted H100 shape.
+
 Live churn sanity check:
 
 ```text

@@ -230,6 +230,24 @@ Decision: keep buffer reuse. It is not a steady-state throughput win; the value
 is lower allocator pressure and a cleaner template-change path while preserving
 the same live throughput band as the prior eviction fix.
 
+Rejected mine-only `MmaComplete` barrier skip:
+
+```text
+/workspace/logs/direct-miner-h100-prod-n1048576-k32768-skip-mmacomplete-20260518-184710.log
+```
+
+We tested removing the final `MmaComplete` named-barrier arrive from the
+mine-only mainloop, since no current mine-only code waits on that barrier.
+Pattern inspection passed for the production kernel, but live production-shape
+throughput did not improve:
+
+| Shape | Kernel change | Normalized attempts/s at 2002 completions | Last interval attempts/s | Decision |
+|---|---|---:|---:|---|
+| `8192x1048576x32768` | skip mine-only `MmaComplete` arrive | 662,141 | 661,872 | reject |
+
+Decision: do not keep this kernel change. The barrier arrive is not the current
+steady-state bottleneck at the promoted H100 shape.
+
 Live churn sanity check:
 
 ```text
