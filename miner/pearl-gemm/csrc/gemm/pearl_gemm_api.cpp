@@ -1167,6 +1167,31 @@ at::Tensor inner_hash(at::Tensor input_buffer, int64_t iterations) {
   return output;
 }
 
+at::Tensor blake3_single_block_keyed(at::Tensor block, at::Tensor key) {
+  CHECK_DEVICE(block);
+  CHECK_DEVICE(key);
+  CHECK_CONTIGUOUS(block);
+  CHECK_CONTIGUOUS(key);
+
+  TORCH_CHECK(block.dtype() == torch::kUInt32,
+              "block must be a uint32 tensor");
+  TORCH_CHECK(key.dtype() == torch::kUInt32, "key must be a uint32 tensor");
+  CHECK_SHAPE(block, blake3::MSG_BLOCK_SIZE_U32);
+  CHECK_SHAPE(key, blake3::CHAINING_VALUE_SIZE_U32);
+
+  at::cuda::CUDAGuard device_guard{(char)block.get_device()};
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  auto output = torch::empty({blake3::CHAINING_VALUE_SIZE_U32},
+                             block.options().dtype(torch::kUInt32));
+
+  launch_blake3_single_block_keyed_kernel(
+      block.data_ptr<uint32_t>(), key.data_ptr<uint32_t>(),
+      output.data_ptr<uint32_t>(), stream);
+  cudaStreamSynchronize(stream);
+
+  return output;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.doc() = "Pearl GEMM with noising/denoising and PoW extraction";
   m.def("denoise_converter", &denoise_converter,
@@ -1184,6 +1209,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output"), py::arg("scales"), py::arg("max_val") = 63,
         py::arg("smooth_scale") = py::none(), py::arg("fast_math") = false);
   m.def("inner_hash", &inner_hash, "Inner hash function");
+  m.def("blake3_single_block_keyed", &blake3_single_block_keyed,
+        "Scheduled single-block keyed BLAKE3 helper");
   m.def("tensor_hash", &run_tensor_hash,
         "CUDA hash function with configurable kernel parameters",
         py::arg("data"), py::arg("key"), py::arg("out"), py::arg("roots"),
@@ -1441,6 +1468,7 @@ TORCH_LIBRARY(pearl_gemm, m) {
       {at::Tag::pt2_compliant_tag});
 
   m.def("inner_hash(Tensor input_buffer, int iterations = 1) -> Tensor");
+  m.def("blake3_single_block_keyed(Tensor block, Tensor key) -> Tensor");
   m.def(
       "tensor_hash(Tensor data, Tensor key, Tensor(out!) out, Tensor(roots!) "
       "roots, "
@@ -1470,6 +1498,7 @@ TORCH_LIBRARY_IMPL(pearl_gemm, CUDA, m) {
   m.impl("noise_gen", &noise_gen);
   m.impl("quantize", &quantize);
   m.impl("inner_hash", &inner_hash);
+  m.impl("blake3_single_block_keyed", &blake3_single_block_keyed);
   m.impl("tensor_hash", &run_tensor_hash);
   m.impl("commitment_hash_from_merkle_roots",
          &run_commitment_hash_from_merkle_roots);

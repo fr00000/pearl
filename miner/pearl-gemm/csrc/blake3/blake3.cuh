@@ -123,6 +123,31 @@ using namespace cute;
     rBlock(15) = rOrigBlock(8);  \
   } while (0)
 
+#define BLAKE3_G_MSG(a, b, c, d, mx, my)                         \
+  do {                                                            \
+    rState(a) = add32(rState(a), add32(rState(b), block(mx)));    \
+    rState(d) = rightrotate32(rState(d) ^ rState(a), 16);         \
+    rState(c) = add32(rState(c), rState(d));                      \
+    rState(b) = rightrotate32(rState(b) ^ rState(c), 12);         \
+    rState(a) = add32(rState(a), add32(rState(b), block(my)));    \
+    rState(d) = rightrotate32(rState(d) ^ rState(a), 8);          \
+    rState(c) = add32(rState(c), rState(d));                      \
+    rState(b) = rightrotate32(rState(b) ^ rState(c), 7);          \
+  } while (0)
+
+#define BLAKE3_ROUND_MSG(m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, \
+                         m11, m12, m13, m14, m15)                    \
+  do {                                                               \
+    BLAKE3_G_MSG(0, 4, 8, 12, m0, m1);                               \
+    BLAKE3_G_MSG(1, 5, 9, 13, m2, m3);                               \
+    BLAKE3_G_MSG(2, 6, 10, 14, m4, m5);                              \
+    BLAKE3_G_MSG(3, 7, 11, 15, m6, m7);                              \
+    BLAKE3_G_MSG(0, 5, 10, 15, m8, m9);                              \
+    BLAKE3_G_MSG(1, 6, 11, 12, m10, m11);                            \
+    BLAKE3_G_MSG(2, 7, 8, 13, m12, m13);                             \
+    BLAKE3_G_MSG(3, 4, 9, 14, m14, m15);                             \
+  } while (0)
+
 using u32 = uint32_t;
 using u64 = uint64_t;
 
@@ -198,6 +223,46 @@ CUTLASS_DEVICE void compress_msg_block_u32(
   BLAKE3_ROUND();
   // Real BLAKE3 has some operations here on state8-15, but we don't care about these
   // so we can only change state0-7. Copy the result to the chaining value tensor.
+  chaining_value(0) = rState(0) ^ rState(8);
+  chaining_value(1) = rState(1) ^ rState(9);
+  chaining_value(2) = rState(2) ^ rState(10);
+  chaining_value(3) = rState(3) ^ rState(11);
+  chaining_value(4) = rState(4) ^ rState(12);
+  chaining_value(5) = rState(5) ^ rState(13);
+  chaining_value(6) = rState(6) ^ rState(14);
+  chaining_value(7) = rState(7) ^ rState(15);
+}
+
+// Compress the exact PoW message shape: one 64-byte block with a keyed BLAKE3
+// chaining value. This avoids the generic compressor's rBlock copy and
+// per-round permutation scratch. The message schedule below is P^round for
+// BLAKE3's fixed permutation.
+template <class RmemTensorBlock, class RmemTensorChainingValue>
+CUTLASS_DEVICE void compress_single_block_keyed_u32_scheduled(
+    RmemTensorBlock const& block, RmemTensorChainingValue& chaining_value) {
+  Tensor rState = make_tensor<uint32_t>(Int<MSG_BLOCK_SIZE_U32>{});
+
+  CUTLASS_PRAGMA_UNROLL
+  for (int i = 0; i < CHAINING_VALUE_SIZE_U32; ++i) {
+    rState(i) = chaining_value(i);
+  }
+  rState(8) = IV0;
+  rState(9) = IV1;
+  rState(10) = IV2;
+  rState(11) = IV3;
+  rState(12) = 0;
+  rState(13) = 0;
+  rState(14) = MSG_BLOCK_SIZE;
+  rState(15) = KEYED_HASH | CHUNK_START | CHUNK_END | ROOT;
+
+  BLAKE3_ROUND_MSG(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+  BLAKE3_ROUND_MSG(2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8);
+  BLAKE3_ROUND_MSG(3, 4, 10, 12, 13, 2, 7, 14, 6, 5, 9, 0, 11, 15, 8, 1);
+  BLAKE3_ROUND_MSG(10, 7, 12, 9, 14, 3, 13, 15, 4, 0, 11, 2, 5, 8, 1, 6);
+  BLAKE3_ROUND_MSG(12, 13, 9, 11, 15, 10, 14, 8, 7, 2, 5, 3, 0, 1, 6, 4);
+  BLAKE3_ROUND_MSG(9, 14, 11, 5, 8, 12, 15, 1, 13, 3, 0, 10, 2, 6, 4, 7);
+  BLAKE3_ROUND_MSG(11, 15, 5, 0, 1, 9, 8, 6, 14, 10, 2, 12, 3, 4, 7, 13);
+
   chaining_value(0) = rState(0) ^ rState(8);
   chaining_value(1) = rState(1) ^ rState(9);
   chaining_value(2) = rState(2) ^ rState(10);

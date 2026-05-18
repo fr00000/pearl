@@ -216,8 +216,7 @@ CUTLASS_DEVICE bool check_pow_target(const TranscriptTensor& transcript,
   for (int i = 0; i < blake3::CHAINING_VALUE_SIZE_U32; ++i) {
     hash(i) = pow_key[i];
   }
-  blake3::compress_msg_block_u32(transcript, hash,
-                                 blake3::COMPRESS_PARAMS_SINGLE_BLOCK_KEYED);
+  blake3::compress_single_block_keyed_u32_scheduled(transcript, hash);
 
   if constexpr (EnablePowDiagnostics) {
     cute::array<uint32_t, blake3::CHAINING_VALUE_SIZE_U32> hash_words;

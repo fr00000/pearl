@@ -56,3 +56,37 @@ void launch_inner_hash_kernel(uint32_t* input_buffer, int input_size,
     assert(false);
   }
 }
+
+__global__ void blake3_single_block_keyed_kernel(const uint32_t* block,
+                                                 const uint32_t* key,
+                                                 uint32_t* output_hash) {
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    Tensor rBlock = make_tensor<uint32_t>(Int<blake3::MSG_BLOCK_SIZE_U32>{});
+    Tensor rKey =
+        make_tensor<uint32_t>(Int<blake3::CHAINING_VALUE_SIZE_U32>{});
+
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < blake3::MSG_BLOCK_SIZE_U32; ++i) {
+      rBlock(i) = block[i];
+    }
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < blake3::CHAINING_VALUE_SIZE_U32; ++i) {
+      rKey(i) = key[i];
+    }
+
+    blake3::compress_single_block_keyed_u32_scheduled(rBlock, rKey);
+
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < blake3::CHAINING_VALUE_SIZE_U32; ++i) {
+      output_hash[i] = rKey(i);
+    }
+  }
+}
+
+void launch_blake3_single_block_keyed_kernel(const uint32_t* block,
+                                             const uint32_t* key,
+                                             uint32_t* output_hash,
+                                             cudaStream_t stream) {
+  blake3_single_block_keyed_kernel<<<1, 1, 0, stream>>>(block, key,
+                                                        output_hash);
+}
