@@ -180,6 +180,35 @@ swizzle8` kernel remains the best H100 setting. The result also suggests the
 current pipeline is not over-buffered: cutting to two stages or doubling `tile_k`
 reduces throughput rather than freeing useful occupancy.
 
+### Low-register production-family probe
+
+Pod artifacts:
+
+```text
+/workspace/build-logs/h100-lowregs-uv-sync-20260518-095739.log
+/workspace/sweeps/kernel-h100-20260518-101101/summary.csv
+```
+
+We also compiled explicit lower MMA register budgets for the exact production
+tile family: `regs=96/112/128/144`, plus the existing `regs=160` control. The
+goal was to see whether reducing the live accumulator budget unlocked a larger
+occupancy win.
+
+All variants built and passed the forced-win pattern inspector. One-minute
+production-shape results:
+
+| Variant | Normalized attempts/s | Delta vs `regs160` |
+|---|---:|---:|
+| `regs160` | 657,829 | baseline |
+| `regs144` | 657,321 | -0.08% |
+| `regs128` | 656,999 | -0.13% |
+| `regs112` | 656,644 | -0.18% |
+| `regs96` | 655,421 | -0.37% |
+
+Decision: keep `regs160`. Lowering `warpgroup_reg_alloc` does not produce a
+material occupancy win for the current `128x256x128 c2x1` mine kernel, so the
+extra compile variants were removed again.
+
 ## 2026-05-18 H100 PoW Hot-Path Micro-Optimizations
 
 Pod artifacts:

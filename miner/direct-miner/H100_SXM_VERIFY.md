@@ -137,6 +137,31 @@ The buildable quick cells all lost to production:
 Decision: keep the current production kernel. The simple config space around
 pipeline stages, `tile_k`, and register cap is exhausted for this shape.
 
+### 2026-05-18 low-register production-family probe
+
+Pod artifacts:
+
+```text
+/workspace/build-logs/h100-lowregs-uv-sync-20260518-095739.log
+/workspace/sweeps/kernel-h100-20260518-101101/summary.csv
+```
+
+We compiled and swept lower explicit `warpgroup_reg_alloc` values for the exact
+production tile family (`128x256x128 s3 c2x1`) to check whether register-pressure
+relief could produce an occupancy-level gain.
+
+| Variant | Normalized attempts/s | Delta vs `regs160` |
+|---|---:|---:|
+| `regs160` | 657,829 | baseline |
+| `regs144` | 657,321 | -0.08% |
+| `regs128` | 656,999 | -0.13% |
+| `regs112` | 656,644 | -0.18% |
+| `regs96` | 655,421 | -0.37% |
+
+All variants passed the forced-win pattern inspector. Decision: keep `regs160`
+and remove the extra compile variants; the current production kernel does not
+gain meaningful occupancy from a lower explicit MMA register budget.
+
 ### 2026-05-18 PoW hot-path micro-optimizations
 
 Pod artifacts:
