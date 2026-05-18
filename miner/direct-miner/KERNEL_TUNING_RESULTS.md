@@ -100,6 +100,57 @@ small but confirmed expected-coin-rate gain and uses the same B-cache footprint
 as the prior production shape. The A-slot pool grows because `k` doubles, but
 the H100 pod still has ample VRAM in this configuration.
 
+## 2026-05-18 H100 Second-Pass Kernel Probes
+
+Pod artifacts:
+
+```text
+/workspace/build-logs/h100-kopt-uv-sync-20260518-045331.log
+/workspace/build-logs/h100-kopt-uv-sync-20260518-050259.log
+/workspace/build-logs/h100-kopt-uv-sync-20260518-051135.log
+/workspace/sweeps/kernel-h100-20260518-052956/summary.csv
+```
+
+After promoting the `k=32768` shape, we compiled a focused second-pass grid to
+test whether the production `128x256x128, stages=3, c2x1, regs=160` kernel was
+still leaving easy launch-config wins on the table.
+
+The `tile_m=256` probe family is not viable as a config-only change. PTXAS
+reported that the `256x256x128` kernel needs a register target of roughly `154`
+or higher, but the `640`-thread CTA launch shape caps the usable register budget
+near `96` registers/thread. Keeping this path would require a real live-state or
+CTA-layout rewrite before it can compile.
+
+The buildable second-pass cells were then run for quick 60-second checks at the
+current production shape:
+
+```text
+m=8192 n=262144 k=32768
+max_in_flight=4
+B-cache enabled
+headless kernel enabled
+kernel_swizzle=8
+```
+
+The sweep used the last steady progress line because timeout shutdown can spend
+extra time draining callbacks after `SIGINT`; all cells had `errors=0` and
+passed the pattern inspector.
+
+| Variant | Kernel | Normalized attempts/s | Delta vs production | Decision |
+|---|---|---:|---:|---|
+| `prod_regs160` | `128x256x128 s3 c2x1 regs160` | 656,523 | baseline | keep |
+| `k256_s2_c2x1_regs160` | `128x256x256 s2 c2x1 regs160` | 595,217 | -9.34% | reject |
+| `k256_s2_c2x1_regs192` | `128x256x256 s2 c2x1 regs192` | 592,011 | -9.83% | reject |
+| `prod_s2_c2x1_regs160` | `128x256x128 s2 c2x1 regs160` | 555,949 | -15.32% | reject |
+| `prod_s2_c2x1_regs192` | `128x256x128 s2 c2x1 regs192` | 554,100 | -15.60% | reject |
+| `prod_s2_c1x1` | `128x256x128 s2 c1x1` | 545,181 | -16.96% | reject |
+| `k256_s2_c1x1` | `128x256x256 s2 c1x1` | 502,168 | -23.51% | reject |
+
+Decision: no production change. The current 3-stage `128x256x128 c2x1 regs160
+swizzle8` kernel remains the best H100 setting. The result also suggests the
+current pipeline is not over-buffered: cutting to two stages or doubling `tile_k`
+reduces throughput rather than freeing useful occupancy.
+
 ## 2026-05-17 Post-Hash-Fix Wide-n Confirmation
 
 Pod artifacts:

@@ -70,6 +70,38 @@ Decision: promote `8192 x 262144 x 32768`. It keeps the same 8 GiB B tensor
 footprint as the previous production shape, while the A-slot pool grows from
 about 1.58 GiB to about 2.36 GiB at `max_in_flight=4`.
 
+### 2026-05-18 second-pass kernel probes
+
+Pod artifacts:
+
+```text
+/workspace/build-logs/h100-kopt-uv-sync-20260518-045331.log
+/workspace/build-logs/h100-kopt-uv-sync-20260518-050259.log
+/workspace/build-logs/h100-kopt-uv-sync-20260518-051135.log
+/workspace/sweeps/kernel-h100-20260518-052956/summary.csv
+```
+
+After selecting `8192 x 262144 x 32768`, we checked a focused second-pass H100
+kernel grid. The larger `tile_m=256` family was rejected at build time: PTXAS
+needs roughly `154` registers/thread for `256x256x128`, while the `640`-thread
+CTA shape caps the usable register budget near `96`. That route needs a deeper
+kernel rewrite, not another launch flag.
+
+The buildable quick cells all lost to production:
+
+| Variant | Kernel | Normalized attempts/s | Delta vs production |
+|---|---|---:|---:|
+| `prod_regs160` | `128x256x128 s3 c2x1 regs160 sw8` | 656,523 | baseline |
+| `k256_s2_c2x1_regs160` | `128x256x256 s2 c2x1 regs160 sw8` | 595,217 | -9.34% |
+| `k256_s2_c2x1_regs192` | `128x256x256 s2 c2x1 regs192 sw8` | 592,011 | -9.83% |
+| `prod_s2_c2x1_regs160` | `128x256x128 s2 c2x1 regs160 sw8` | 555,949 | -15.32% |
+| `prod_s2_c2x1_regs192` | `128x256x128 s2 c2x1 regs192 sw8` | 554,100 | -15.60% |
+| `prod_s2_c1x1` | `128x256x128 s2 c1x1 sw8` | 545,181 | -16.96% |
+| `k256_s2_c1x1` | `128x256x256 s2 c1x1 sw8` | 502,168 | -23.51% |
+
+Decision: keep the current production kernel. The simple config space around
+pipeline stages, `tile_k`, and register cap is exhausted for this shape.
+
 ### 2026-05-17 register/swizzle confirmation
 
 Pod artifacts:
