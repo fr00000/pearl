@@ -30,6 +30,7 @@ MAX_IN_FLIGHT="${MAX_IN_FLIGHT:-4}"
 GPU_INDEX="${GPU_INDEX:-0}"
 DURATION_S="${DURATION_S:-300}"
 VARIANT_FILTER="${VARIANT_FILTER:-}"
+KERNEL_SWIZZLE="${KERNEL_SWIZZLE:-8}"
 
 OUTDIR="/workspace/sweeps/kernel-h100-$(date +%Y%m%d-%H%M%S)"
 SUMMARY="$OUTDIR/summary.csv"
@@ -72,6 +73,7 @@ echo "Kernel sweep output: $OUTDIR"
 echo "GPU: $GPU_INDEX"
 echo "Shape: m=$SHAPE_M n=$SHAPE_N k=$SHAPE_K"
 echo "max_in_flight: $MAX_IN_FLIGHT"
+echo "kernel_swizzle: $KERNEL_SWIZZLE"
 echo "duration/cell: ${DURATION_S}s"
 echo "variants: ${#VARIANTS[@]}"
 if [[ -n "$VARIANT_FILTER" ]]; then
@@ -136,6 +138,7 @@ for entry in "${VARIANTS[@]}"; do
         --kernel-stages "$stages"
         --kernel-cluster-m "$cluster_m"
         --kernel-cluster-n "$cluster_n"
+        --kernel-swizzle "$KERNEL_SWIZZLE"
         --log-interval 100
         --phase-tag "kernel_${variant_id}"
     )
