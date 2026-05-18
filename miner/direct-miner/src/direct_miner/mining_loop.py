@@ -29,6 +29,7 @@ from .attempt_metrics import (
     outer_tiles_per_matmul,
     protocol_weighted_attempts_per_matmul,
     rounded_common_dim,
+    transcript_words_per_matmul,
 )
 from .b_cache import BSideCache
 from .completion_tracker import CompletionTracker
@@ -56,6 +57,10 @@ class DirectMiner:
 
     def __init__(self, config: MinerConfig):
         config.shapes.validate()
+        if config.enable_transcript_kernel and not config.enable_headless_kernel:
+            raise ValueError(
+                "--enable-transcript-kernel requires --enable-headless-kernel"
+            )
         self.config = config
         self.b_pool: Optional[FixedBPool] = None
 
@@ -209,6 +214,24 @@ class DirectMiner:
             if self.config.enable_kernel_hash_stats
             else None
         )
+        transcript_buffer_words = (
+            transcript_words_per_matmul(
+                m=self.config.shapes.m,
+                n=self.config.shapes.n,
+                tile_m=self.config.kernel_tile_size_m,
+                tile_n=self.config.kernel_tile_size_n,
+                cluster_m=self.config.kernel_cluster_size_m,
+                cluster_n=self.config.kernel_cluster_size_n,
+            )
+            if self.config.enable_transcript_kernel
+            else None
+        )
+        if transcript_buffer_words is not None:
+            logger.info(
+                "Split transcript kernel ENABLED: "
+                f"{transcript_buffer_words * 4 / 1024**3:.2f} GiB "
+                "transcript buffer per in-flight slot"
+            )
         self.a_pool = ASlotPool(
             num_slots=self.config.max_in_flight,
             m=self.config.shapes.m,
@@ -218,6 +241,7 @@ class DirectMiner:
             host_signal_sync_size=host_signal_sync_size,
             scratchpad_bytes=scratchpad_bytes,
             pow_diagnostics_size=pow_diagnostics_size,
+            transcript_buffer_words=transcript_buffer_words,
             allocate_c=not self.config.enable_headless_kernel,
         )
 
@@ -236,6 +260,7 @@ class DirectMiner:
             f"{self._protocol_weighted_attempts_per_matmul:.1f} "
             f"max_in_flight={self.config.max_in_flight} "
             f"headless_kernel={self.config.enable_headless_kernel} "
+            f"transcript_kernel={self.config.enable_transcript_kernel} "
             f"kernel_hash_stats={self.config.enable_kernel_hash_stats} "
             f"kernel={self.config.kernel_tile_size_m}x"
             f"{self.config.kernel_tile_size_n}x"
@@ -466,6 +491,7 @@ class DirectMiner:
                 kernel_swizzle=self.config.kernel_swizzle,
                 kernel_swizzle_n_maj=self.config.kernel_swizzle_n_maj,
                 pow_diagnostics=slot.pow_diagnostics,
+                use_transcript_kernel=self.config.enable_transcript_kernel,
             )
         except UnsafeSlotReleaseError:
             # Cleanup couldn't prove the GPU is idle, so the slot was

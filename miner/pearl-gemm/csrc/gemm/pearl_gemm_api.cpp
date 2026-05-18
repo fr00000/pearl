@@ -147,7 +147,7 @@ void denoise_converter(
     check_tensor(EARxBpEB_in, n, r, torch::kInt32);
     check_tensor(EARxBpEB_out, n, r, torch::kFloat16);
   }
-  PearlAPIParams params;
+  PearlAPIParams params{};
 
   params.ptr_AxEBL_int32 = convert_AxEBL ? AxEBL_in.data_ptr() : nullptr;
   params.ptr_AxEBL_mma = convert_AxEBL ? AxEBL_out.data_ptr() : nullptr;
@@ -357,7 +357,7 @@ void noise_A(at::Tensor& A,                          // m x k
         get_num_k_blocks(m, tile_size_m, k, tile_size_k, dprops);
   }
 
-  PearlAPIParams params;
+  PearlAPIParams params{};
   params.m = m;
   params.n = n;
   params.k = k;
@@ -458,7 +458,7 @@ void noise_B(at::Tensor& B,                          // n x k
         get_num_k_blocks(n, tile_size_n, k, tile_size_k, dprops);
   }
 
-  PearlAPIParams params;
+  PearlAPIParams params{};
 
   params.m = m;
   params.n = n;
@@ -542,7 +542,7 @@ void gemm(at::Tensor& A,         // m x k
 
   TORCH_CHECK(k % bK == 0, "K must be divisible by bK");
 
-  PearlAPIParams params;
+  PearlAPIParams params{};
   using ElementOut = cutlass::bfloat16_t;
 
   static constexpr int align_n = 128 / (sizeof(ElementOut) * 8);
@@ -666,7 +666,9 @@ void noisy_gemm(
     bool mine_only = false,
     std::optional<at::Tensor> inner_hash_counter = std::nullopt,
     bool enable_debug = false,
-    std::optional<at::Tensor> pow_diagnostics = std::nullopt) {
+    std::optional<at::Tensor> pow_diagnostics = std::nullopt,
+    std::optional<at::Tensor> transcript_buffer = std::nullopt,
+    bool split_transcript_check = false) {
   auto dprops = at::cuda::getCurrentDeviceProperties();
   bool const effective_skip_denoising = skip_denoising || mine_only;
 
@@ -712,6 +714,40 @@ void noisy_gemm(
   int n = int(B.size(0));
   int k = int(A.size(1));
   int r = int(EAL.size(1));
+
+  at::Tensor transcript_buffer_tensor;
+  int64_t required_transcript_words = 0;
+  if (split_transcript_check) {
+    TORCH_CHECK(mine_only,
+                "split_transcript_check is only supported for mine_only=True");
+    TORCH_CHECK(transcript_buffer.has_value(),
+                "split_transcript_check requires a transcript_buffer tensor");
+    transcript_buffer_tensor = transcript_buffer.value();
+    CHECK_DEVICE(transcript_buffer_tensor);
+    CHECK_CONTIGUOUS(transcript_buffer_tensor);
+    TORCH_CHECK(transcript_buffer_tensor.scalar_type() == torch::kUInt32,
+                "transcript_buffer must be uint32 dtype. It currently has ",
+                c10::toString(transcript_buffer_tensor.scalar_type()), ".");
+    TORCH_CHECK(transcript_buffer_tensor.dim() == 1,
+                "transcript_buffer must be a 1D uint32 tensor");
+    TORCH_CHECK(bM % 64 == 0,
+                "split_transcript_check requires bM to be a multiple of 64");
+    auto ceil_div_i64 = [](int64_t a, int64_t b) {
+      return (a + b - 1) / b;
+    };
+    int64_t const num_blocks_m = ceil_div_i64(m, bM);
+    int64_t const num_blocks_n = ceil_div_i64(n, bN);
+    int64_t const rounded_blocks_m = ceil_div_i64(num_blocks_m, cM) * cM;
+    int64_t const rounded_blocks_n = ceil_div_i64(num_blocks_n, cN) * cN;
+    int64_t const mma_threads = (bM / 64) * 128;
+    required_transcript_words =
+        rounded_blocks_m * rounded_blocks_n * mma_threads *
+        blake3::MSG_BLOCK_SIZE_U32;
+    TORCH_CHECK(transcript_buffer_tensor.size(0) >= required_transcript_words,
+                "transcript_buffer too small: need at least ",
+                required_transcript_words, " uint32 words, got ",
+                transcript_buffer_tensor.size(0));
+  }
 
   TORCH_CHECK(
       EAR_R_major_.has_value() && EBL_R_major_.has_value() &&
@@ -813,7 +849,7 @@ void noisy_gemm(
       "mma_registers must be None/0 or within [24, 256]. Got ",
       mma_registers);
 
-  PearlAPIParams params;
+  PearlAPIParams params{};
   using ElementOut = cutlass::bfloat16_t;
 
   static constexpr int align_n = 128 / (sizeof(ElementOut) * 8);
@@ -888,6 +924,10 @@ void noisy_gemm(
   // PoW target and key
   params.ptr_pow_target = pow_target.data_ptr();
   params.ptr_pow_key = pow_key.data_ptr();
+  params.ptr_transcript_buffer =
+      split_transcript_check ? transcript_buffer_tensor.data_ptr() : nullptr;
+  params.transcript_buffer_words =
+      split_transcript_check ? required_transcript_words : 0;
 
   // Validate that inner_hash_counter is provided when enable_debug is true
   TORCH_CHECK(!enable_debug || params.inner_hash_counter != nullptr,
@@ -953,9 +993,16 @@ void noisy_gemm(
             MINE_CONFIG_SWITCH(
                 bM, bN, bK, r, pipeline_stages, cM, cN, mma_registers,
                 kernel_found_matmul = true;
-                run_pearl_mine_<ElementOut, R_, bM_, bN_, bK_, stages_, cM_,
-                                cN_, mma_registers_, EnableDebug,
-                                EnablePowDiagnostics>(params, stream););
+                if (split_transcript_check) {
+                  run_pearl_mine_split_<ElementOut, R_, bM_, bN_, bK_,
+                                        stages_, cM_, cN_, mma_registers_,
+                                        EnableDebug, EnablePowDiagnostics>(
+                      params, stream);
+                } else {
+                  run_pearl_mine_<ElementOut, R_, bM_, bN_, bK_, stages_, cM_,
+                                  cN_, mma_registers_, EnableDebug,
+                                  EnablePowDiagnostics>(params, stream);
+                });
           } else {
             SKIP_REDUCTION_SWITCH(
                 skip_reduction, SkipReduction,
@@ -981,6 +1028,8 @@ void noisy_gemm(
               ", SkipDenoising = ",
               effective_skip_denoising ? "true" : "false",
               ", MineOnly = ", mine_only ? "true" : "false",
+              ", SplitTranscriptCheck = ",
+              split_transcript_check ? "true" : "false",
               ", DebugMode = ", enable_debug ? "true" : "false",
               ", AxEBL of type ", c10::toString(AxEBL_noising_dtype),
               ", EARxBpEB of type ", c10::toString(EARxBpEB_noising_dtype));
@@ -1052,6 +1101,63 @@ void headless_mine(
              k_blocks_per_split_noising_B_, run_noising_a, run_noising_b,
              false, true, true, inner_hash_counter, enable_debug,
              pow_diagnostics);
+}
+
+void headless_mine_split(
+    at::Tensor& A,                                  // m x k
+    at::Tensor& B,                                  // n x k
+    at::Tensor& EAL,                                // m x r
+    const std::optional<at::Tensor>& EAL_fp16_,     // m x r
+    at::Tensor& EBR,                                // n x r
+    const std::optional<at::Tensor>& EBR_fp16_,     // n x r
+    const std::optional<at::Tensor>& EAR_R_major_,  // k x r
+    const std::optional<at::Tensor>& EBL_R_major_,  // k x r
+    const std::optional<at::Tensor>& EAR_K_major_,  // r x k
+    const std::optional<at::Tensor>& EBL_K_major_,  // r x k
+    at::Tensor& AxEBL_fp16,                         // m x r fp16
+    at::Tensor& EARxBpEB_fp16,                      // n x r fp16
+    at::Tensor& ApEA,                               // m x k
+    at::Tensor& BpEB,                               // n x k
+    at::Tensor& host_signal_header_pinned, at::Tensor& host_signal_sync,
+    at::Tensor& pow_target, at::Tensor& pow_key,
+    at::Tensor& transcript_buffer,
+    const std::optional<at::Tensor>& AxEBL_int32_,
+    const std::optional<at::Tensor>& EARxBpEB_int32_, int64_t bM, int64_t bN,
+    int64_t bK, int64_t cM, int64_t cN,
+    std::optional<int64_t> pipeline_stages_ = std::nullopt,
+    std::optional<int64_t> mma_registers_ = std::nullopt,
+    std::optional<int64_t> swizzle = std::nullopt, bool swizzle_n_maj = true,
+    std::optional<int64_t> tile_size_m_noising_A_ = std::nullopt,
+    std::optional<int64_t> tile_size_n_noising_B_ = std::nullopt,
+    std::optional<int64_t> tile_size_k_noising_A_ = std::nullopt,
+    std::optional<int64_t> tile_size_k_noising_B_ = std::nullopt,
+    int64_t pipeline_stages_noising_A = 2,
+    int64_t pipeline_stages_noising_B = 2,
+    std::optional<int64_t> k_blocks_per_split_noising_A_ = std::nullopt,
+    std::optional<int64_t> k_blocks_per_split_noising_B_ = std::nullopt,
+    bool run_noising_a = true, bool run_noising_b = true,
+    std::optional<at::Tensor> inner_hash_counter = std::nullopt,
+    bool enable_debug = false,
+    std::optional<at::Tensor> pow_diagnostics = std::nullopt) {
+  at::Tensor A_scales_dummy =
+      torch::empty({0}, A.options().dtype(torch::kFloat32));
+  at::Tensor B_scales_dummy =
+      torch::empty({0}, B.options().dtype(torch::kFloat32));
+  at::Tensor C_dummy = torch::empty({0}, A.options().dtype(torch::kBFloat16));
+
+  noisy_gemm(A, B, EAL, EAL_fp16_, EBR, EBR_fp16_, EAR_R_major_, EBL_R_major_,
+             EAR_K_major_, EBL_K_major_, AxEBL_fp16, EARxBpEB_fp16, ApEA,
+             BpEB, A_scales_dummy, B_scales_dummy, C_dummy,
+             host_signal_header_pinned, host_signal_sync, pow_target, pow_key,
+             AxEBL_int32_, EARxBpEB_int32_, bM, bN, bK, cM, cN,
+             pipeline_stages_, mma_registers_, swizzle, swizzle_n_maj,
+             tile_size_m_noising_A_, tile_size_n_noising_B_,
+             tile_size_k_noising_A_,
+             tile_size_k_noising_B_, pipeline_stages_noising_A,
+             pipeline_stages_noising_B, k_blocks_per_split_noising_A_,
+             k_blocks_per_split_noising_B_, run_noising_a, run_noising_b,
+             false, true, true, inner_hash_counter, enable_debug,
+             pow_diagnostics, transcript_buffer, true);
 }
 
 void quantize(const at::Tensor& input, const at::Tensor& output,
@@ -1173,6 +1279,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Convert denoising factors from int32 to fp16");
   m.def("noisy_gemm", &noisy_gemm, "Noisy GEMM");
   m.def("headless_mine", &headless_mine, "Noisy GEMM mining without C output");
+  m.def("headless_mine_split", &headless_mine_split,
+        "Noisy GEMM mining with split transcript producer/check kernels");
   m.def("gemm", &gemm, "GEMM without noising steps");
   m.def("noise_A", &noise_A, "Noise A (activations)");
   m.def("noise_B", &noise_B, "Noise B (weights)");
@@ -1320,7 +1428,9 @@ TORCH_LIBRARY(pearl_gemm, m) {
       "    bool mine_only = False, "
       "    Tensor(inner_hash_counter!)? inner_hash_counter = None, "
       "    bool enable_debug = False, "
-      "    Tensor(pow_diagnostics!)? pow_diagnostics = None"
+      "    Tensor(pow_diagnostics!)? pow_diagnostics = None, "
+      "    Tensor(transcript_buffer!)? transcript_buffer = None, "
+      "    bool split_transcript_check = False"
       ") -> ()",
       {at::Tag::pt2_compliant_tag});
 
@@ -1344,6 +1454,54 @@ TORCH_LIBRARY(pearl_gemm, m) {
       "    Tensor(host_signal_sync!) host_signal_sync, "
       "    Tensor pow_target, "
       "    Tensor pow_key, "
+      "    Tensor(AxEBL_int32!)? AxEBL_int32 = None,"
+      "    Tensor(EARxBpEB_int32!)? EARxBpEB_int32 = None,"
+      "    int tile_size_m = 128, "
+      "    int tile_size_n = 256, "
+      "    int tile_size_k = 128, "
+      "    int cluster_size_m = 1, "
+      "    int cluster_size_n = 1, "
+      "    int? pipeline_stages = None, "
+      "    int? mma_registers = None, "
+      "    int? swizzle = None, "
+      "    bool swizzle_n_maj = True, "
+      "    int? tile_size_m_noising_A = None, "
+      "    int? tile_size_n_noising_B = None, "
+      "    int? tile_size_k_noising_A = None, "
+      "    int? tile_size_k_noising_B = None, "
+      "    int pipeline_stages_noising_A = 2, "
+      "    int pipeline_stages_noising_B = 2, "
+      "    int? k_blocks_per_split_noising_A = None, "
+      "    int? k_blocks_per_split_noising_B = None, "
+      "    bool run_noising_A = True, "
+      "    bool run_noising_B = False, "
+      "    Tensor(inner_hash_counter!)? inner_hash_counter = None, "
+      "    bool enable_debug = False, "
+      "    Tensor(pow_diagnostics!)? pow_diagnostics = None"
+      ") -> ()",
+      {at::Tag::pt2_compliant_tag});
+
+  m.def(
+      "headless_mine_split("
+      "    Tensor A, "
+      "    Tensor B, "
+      "    Tensor EAL, "
+      "    Tensor? EAL_fp16, "
+      "    Tensor EBR, "
+      "    Tensor? EBR_fp16, "
+      "    Tensor? EAR_R_major, "
+      "    Tensor? EBL_R_major, "
+      "    Tensor? EAR_K_major, "
+      "    Tensor? EBL_K_major, "
+      "    Tensor(AxEBL_fp16!) AxEBL_fp16, "
+      "    Tensor(EARxBpEB_fp16!) EARxBpEB_fp16, "
+      "    Tensor(ApEA!) ApEA, "
+      "    Tensor(BpEB!) BpEB, "
+      "    Tensor(host_signal_header_pinned!) host_signal_header_pinned, "
+      "    Tensor(host_signal_sync!) host_signal_sync, "
+      "    Tensor pow_target, "
+      "    Tensor pow_key, "
+      "    Tensor(transcript_buffer!) transcript_buffer, "
       "    Tensor(AxEBL_int32!)? AxEBL_int32 = None,"
       "    Tensor(EARxBpEB_int32!)? EARxBpEB_int32 = None,"
       "    int tile_size_m = 128, "
@@ -1463,6 +1621,7 @@ TORCH_LIBRARY(pearl_gemm, m) {
 TORCH_LIBRARY_IMPL(pearl_gemm, CUDA, m) {
   m.impl("noisy_gemm", &noisy_gemm);
   m.impl("headless_mine", &headless_mine);
+  m.impl("headless_mine_split", &headless_mine_split);
   m.impl("gemm", &gemm);
   m.impl("noise_A", &noise_A);
   m.impl("noise_B", &noise_B);

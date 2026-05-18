@@ -423,4 +423,255 @@ __global__ void __launch_bounds__(
   }
 }
 
+template <typename KTraits, typename BlockCoord>
+CUTE_DEVICE int64_t transcript_word_offset(
+    typename KTraits::ProblemShape const& problem_shape,
+    BlockCoord const& block_coord, int consumer_tix) {
+  using ClusterShape = typename KTraits::ClusterShape_MNK;
+  int const num_blocks_n = cutlass::ceil_div(get<1>(problem_shape), KTraits::bN);
+  int const num_clusters_n =
+      cutlass::ceil_div(num_blocks_n, size<1>(ClusterShape{}));
+  int const rounded_blocks_n = num_clusters_n * size<1>(ClusterShape{});
+
+  int64_t const tile_linear =
+      static_cast<int64_t>(get<0>(block_coord)) * rounded_blocks_n +
+      static_cast<int64_t>(get<1>(block_coord));
+  int64_t const ticket_linear =
+      tile_linear * KTraits::kNumMmaThreads + consumer_tix;
+  return ticket_linear * blake3::MSG_BLOCK_SIZE_U32;
+}
+
+template <typename KTraits, typename TileScheduler>
+__global__ void __launch_bounds__(
+    KTraits::kNumWarps* cutlass::NumThreadsPerWarp, 1)
+    hopper_mine_transcript_ws(
+        CUTE_GRID_CONSTANT
+        typename ::pearl::CollectiveMainloop<KTraits>::Params const
+            mainloop_params,
+        CUTE_GRID_CONSTANT typename TileScheduler::Params const
+            scheduler_params) {
+
+  using TileShape_MNK = typename KTraits::TileShape_MNK;
+  using ClusterShape = typename KTraits::ClusterShape_MNK;
+
+  static constexpr int NumMmaThreads = size(typename KTraits::TiledMma{});
+  static constexpr int NumCopyThreads = cutlass::NumThreadsPerWarpGroup;
+  static constexpr int srcLane = KTraits::srcLane;
+
+  using CollectiveMainloop = ::pearl::CollectiveMainloop<KTraits>;
+  using MainloopPipeline = typename KTraits::MainloopPipeline;
+  using PipelineParams = typename MainloopPipeline::Params;
+  using PipelineState = typename MainloopPipeline::PipelineState;
+  using WorkTileInfo = typename TileScheduler::WorkTileInfo;
+
+  extern __shared__ char shared_memory[];
+  auto& shared_storage =
+      *reinterpret_cast<typename KTraits::SharedStorage*>(shared_memory);
+
+  int const lane_predicate = cute::elect_one_sync();
+  int const warp_idx = cutlass::canonical_warp_idx_sync();
+
+  if (warp_idx == 0 && lane_predicate) {
+    CollectiveMainloop::prefetch_tma_descriptors(mainloop_params);
+  }
+
+  PipelineParams pipeline_params;
+  pipeline_params.transaction_bytes = CollectiveMainloop::TmaTransactionBytes;
+  int warp_group_idx = cutlass::canonical_warp_group_idx();
+  bool const is_producer = warp_group_idx == 0;
+  pipeline_params.role = is_producer
+                             ? MainloopPipeline::ThreadCategory::Producer
+                             : MainloopPipeline::ThreadCategory::Consumer;
+  pipeline_params.is_leader = is_producer && lane_predicate;
+  pipeline_params.num_consumers = NumMmaThreads;
+
+  MainloopPipeline pipeline(shared_storage.pipeline, pipeline_params,
+                            ClusterShape{});
+
+  CollectiveMainloop collective_mainloop;
+
+  const int k_tile_count =
+      cutlass::ceil_div(shape<1>(mainloop_params.layout_A), KTraits::bK);
+
+  if constexpr (size(ClusterShape{}) > 1) {
+    cute::cluster_arrive_relaxed();
+    cute::cluster_wait();
+  } else {
+    __syncthreads();
+  }
+
+  static_assert(KTraits::kNumWarps == 8 || KTraits::kNumWarps == 12 ||
+                KTraits::kNumWarps == 16 || KTraits::kNumWarps == 20);
+  if (is_producer) {
+    cutlass::arch::warpgroup_reg_dealloc<KTraits::kNumWarps == 16 ? 32 : 24>();
+
+    int warp_idx_in_warpgroup =
+        __shfl_sync(0xffffffff,
+                    (threadIdx.x / cutlass::NumThreadsPerWarp) %
+                        cutlass::NumWarpsPerWarpGroup,
+                    srcLane);
+    if (warp_idx_in_warpgroup == 0) {
+      PipelineState smem_pipe_write =
+          cutlass::make_producer_start_state<MainloopPipeline>();
+      uint16_t const tma_mcast_mask_a = create_tma_multicast_mask<1>(
+          Layout<ClusterShape>{}, block_id_in_cluster());
+      uint16_t const tma_mcast_mask_b = create_tma_multicast_mask<0>(
+          Layout<ClusterShape>{}, block_id_in_cluster());
+      TileScheduler scheduler{};
+
+      WorkTileInfo work_tile_info =
+          scheduler.get_initial_work(scheduler_params);
+      CUTLASS_PRAGMA_NO_UNROLL
+      while (work_tile_info.is_valid(scheduler_params)) {
+        cute::tuple<int32_t, int32_t, int32_t> block_coord =
+            work_tile_info.template get_block_coord<ClusterShape>(
+                scheduler_params);
+
+        collective_mainloop.load(mainloop_params, pipeline, smem_pipe_write,
+                                 shared_storage, block_coord, k_tile_count,
+                                 tma_mcast_mask_a, tma_mcast_mask_b);
+        collective_mainloop.load_tail(pipeline, smem_pipe_write);
+
+        work_tile_info = scheduler.template get_next_work</*IsProducer=*/true>(
+            scheduler_params, work_tile_info);
+      }
+    }
+  } else {
+    cutlass::arch::warpgroup_reg_alloc<KTraits::MmaRegisters>();
+
+    TileScheduler scheduler{};
+    typename KTraits::TiledMma tiled_mma;
+    PipelineState smem_pipe_read;
+    int consumer_tix = static_cast<int>(threadIdx.x) - NumCopyThreads;
+
+    collective_mainloop.mma_init();
+
+    WorkTileInfo work_tile_info = scheduler.get_initial_work(scheduler_params);
+    CUTLASS_PRAGMA_NO_UNROLL
+    while (work_tile_info.is_valid(scheduler_params)) {
+      Tensor tCrC =
+          partition_fragment_C(tiled_mma, select<0, 1>(TileShape_MNK{}));
+      clear(tCrC);
+
+      cute::tuple<int32_t, int32_t, int32_t> block_coord =
+          work_tile_info.template get_block_coord<ClusterShape>(
+              scheduler_params);
+
+      auto transcript_extraction_tensor =
+          make_tensor<uint32_t>(Int<blake3::MSG_BLOCK_SIZE_U32>{});
+      clear(transcript_extraction_tensor);
+
+      collective_mainloop.mma(mainloop_params, pipeline, smem_pipe_read, tCrC,
+                              transcript_extraction_tensor, consumer_tix,
+                              shared_storage, k_tile_count);
+
+      uint32_t* transcript_buffer = mainloop_params.ptr_transcript_buffer;
+      int64_t const offset =
+          transcript_word_offset<KTraits>(mainloop_params.problem_shape,
+                                          block_coord, consumer_tix);
+      if (transcript_buffer != nullptr &&
+          offset + blake3::MSG_BLOCK_SIZE_U32 <=
+              mainloop_params.transcript_buffer_words) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < blake3::MSG_BLOCK_SIZE_U32; ++i) {
+          transcript_buffer[offset + i] = transcript_extraction_tensor(i);
+        }
+      }
+
+      work_tile_info = scheduler.template get_next_work</*IsProducer=*/false>(
+          scheduler_params, work_tile_info);
+    }
+  }
+}
+
+template <typename KTraits>
+__global__ void __launch_bounds__(256, 1) hopper_mine_transcript_check(
+    CUTE_GRID_CONSTANT
+    typename ::pearl::CollectiveMainloop<KTraits>::Params const
+        mainloop_params) {
+  using TileShape_MNK = typename KTraits::TileShape_MNK;
+  using ClusterShape = typename KTraits::ClusterShape_MNK;
+
+  static constexpr int NumCopyThreads = cutlass::NumThreadsPerWarpGroup;
+  static constexpr int NumMmaThreads = KTraits::kNumMmaThreads;
+  static constexpr int WordsPerTranscript = blake3::MSG_BLOCK_SIZE_U32;
+
+  int const num_blocks_m =
+      cutlass::ceil_div(get<0>(mainloop_params.problem_shape), KTraits::bM);
+  int const num_blocks_n =
+      cutlass::ceil_div(get<1>(mainloop_params.problem_shape), KTraits::bN);
+  int const num_clusters_m =
+      cutlass::ceil_div(num_blocks_m, size<0>(ClusterShape{}));
+  int const num_clusters_n =
+      cutlass::ceil_div(num_blocks_n, size<1>(ClusterShape{}));
+  int const rounded_blocks_m = num_clusters_m * size<0>(ClusterShape{});
+  int const rounded_blocks_n = num_clusters_n * size<1>(ClusterShape{});
+
+  int64_t const total_tickets =
+      static_cast<int64_t>(rounded_blocks_m) * rounded_blocks_n *
+      NumMmaThreads;
+  int64_t const ticket_idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (ticket_idx >= total_tickets) {
+    return;
+  }
+
+  int const consumer_tix = static_cast<int>(ticket_idx % NumMmaThreads);
+  int64_t const tile_linear = ticket_idx / NumMmaThreads;
+  int const m_block = static_cast<int>(tile_linear / rounded_blocks_n);
+  int const n_block = static_cast<int>(tile_linear -
+                                       static_cast<int64_t>(m_block) *
+                                           rounded_blocks_n);
+  if (m_block >= num_blocks_m || n_block >= num_blocks_n) {
+    return;
+  }
+
+  uint32_t const* transcript_buffer = mainloop_params.ptr_transcript_buffer;
+  if (transcript_buffer == nullptr) {
+    return;
+  }
+
+  cute::tuple<int32_t, int32_t, int32_t> block_coord =
+      make_tuple(m_block, n_block, 1);
+  int64_t const offset =
+      transcript_word_offset<KTraits>(mainloop_params.problem_shape,
+                                      block_coord, consumer_tix);
+  if (offset + WordsPerTranscript > mainloop_params.transcript_buffer_words) {
+    return;
+  }
+
+  auto transcript = make_tensor<uint32_t>(Int<WordsPerTranscript>{});
+  CUTLASS_PRAGMA_UNROLL
+  for (int i = 0; i < WordsPerTranscript; ++i) {
+    transcript(i) = transcript_buffer[offset + i];
+  }
+
+  bool const local_block_found =
+      check_pow_target<KTraits::EnablePowDiagnostics>(
+          transcript, mainloop_params.ptr_pow_target,
+          mainloop_params.ptr_pow_key, mainloop_params.pow_diagnostics,
+          block_coord, consumer_tix);
+
+  if (local_block_found) {
+    cute::array<uint32_t, 3> const original_grid_dim = {
+        static_cast<uint32_t>(rounded_blocks_m),
+        static_cast<uint32_t>(rounded_blocks_n), 1};
+    cute::array<uint32_t, 3> const original_block_dim = {
+        static_cast<uint32_t>(KTraits::kNumWarps * cutlass::NumThreadsPerWarp),
+        1, 1};
+    cute::array<uint32_t, 3> const original_block_idx = {
+        static_cast<uint32_t>(m_block), static_cast<uint32_t>(n_block), 0};
+    cute::array<uint32_t, 3> const original_thread_idx = {
+        static_cast<uint32_t>(consumer_tix + NumCopyThreads), 0, 0};
+
+    write_host_signal_header_with_coords<typename KTraits::TiledMma,
+                                         TileShape_MNK>(
+        mainloop_params.host_signal_sync,
+        mainloop_params.host_signal_header_pinned,
+        mainloop_params.problem_shape, block_coord, consumer_tix,
+        mainloop_params.ptr_pow_target, original_grid_dim, original_block_dim,
+        original_block_idx, original_thread_idx);
+  }
+}
+
 }  // namespace pearl

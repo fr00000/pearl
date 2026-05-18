@@ -1393,3 +1393,41 @@ Conclusion: production-shape kernel hash behavior is statistically sane. The
 kernel is producing the expected number of lottery tickets, and their quality
 matches the random-hash expectation closely enough that future kernel work
 should focus on speed, not lottery-ticket correctness.
+
+### Split Transcript/Checker Probe
+
+On 2026-05-18 we built an opt-in split mining path to test whether the inline
+BLAKE3/target check was the limiting register or latency cost. The new
+`headless_mine_split` path writes one 16-word transcript per MMA consumer
+thread to global memory, then launches a separate checker kernel to perform
+BLAKE3 compression, target comparison, and `HostSignalHeader` publication.
+
+The forced-win pattern inspector passed with the default proof pattern:
+
+```text
+PATTERN_COMPATIBLE=true
+rows=[0, 8]
+cols=[0, 1, 8, 9, ..., 248, 249]
+```
+
+Static resource usage showed no register relief in the producer:
+
+```text
+hopper_mine_ws                 REG:160 STACK:64
+hopper_mine_transcript_ws      REG:160 STACK:64
+hopper_mine_transcript_check   REG:40-48 STACK:0
+```
+
+Matched production-shape benchmark at
+`8192x1048576x32768`, `max_in_flight=1`, `cluster=2x1`,
+`stages=3`, `regs=160`, `swizzle=8`:
+
+| Path | Normalized attempts/s | Chance-weighted/s |
+|---|---:|---:|
+| Inline `headless_mine` | 657,717 | 21.552B |
+| Split transcript/check | 645,025 | 21.136B |
+
+Decision: reject for production. The split path is correct but slower by about
+1.9%, because it keeps the same producer register footprint and adds transcript
+global-memory traffic plus a second kernel launch. Future high-impact H100 work
+still needs to reduce live state inside the main WGMMA transcript path itself.

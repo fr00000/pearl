@@ -247,19 +247,17 @@ CUTLASS_DEVICE bool check_pow_target(const TranscriptTensor& transcript,
   return block_found;
 }
 
-/// Write host signal header with atomic locking.
-/// TiledMma: The MMA type for computing thread coordinate partitions
-/// TileShape: The tile shape (bM, bN, bK) for the MMA operation
-/// ProblemShape: tuple of (M, N, K, R) or (M, N, K)
-/// BlockCoord: tuple of (ix, iy, iz) tile coordinates
-/// pow_target: uint32_t[8] PoW target for header
 template <typename TiledMma, typename TileShape, typename ProblemShape,
           typename BlockCoord>
-CUTLASS_DEVICE void write_host_signal_header(
+CUTLASS_DEVICE void write_host_signal_header_with_coords(
     HostSignalSync* host_signal_sync,
     HostSignalHeader* host_signal_header_pinned,
     ProblemShape const& problem_shape, BlockCoord const& block_coord,
-    int thread_idx, const uint32_t* pow_target) {
+    int thread_idx, const uint32_t* pow_target,
+    cute::array<uint32_t, 3> const& header_grid_dim,
+    cute::array<uint32_t, 3> const& header_block_dim,
+    cute::array<uint32_t, 3> const& header_block_idx,
+    cute::array<uint32_t, 3> const& header_thread_idx) {
   auto ix = static_cast<uint32_t>(get<0>(block_coord));
   auto iy = static_cast<uint32_t>(get<1>(block_coord));
   auto iz = static_cast<uint32_t>(get<2>(block_coord));
@@ -285,11 +283,11 @@ CUTLASS_DEVICE void write_host_signal_header(
   if (host_signal_sync->status != HostSignalStatus::kSignalTriggered) {
     HostSignalHeader new_header = {
         .status = HostSignalStatus::kSignalTriggered,
-        .gridDim = {gridDim.x, gridDim.y, gridDim.z},
-        .blockDim = {blockDim.x, blockDim.y, blockDim.z},
-        .blockIdx = {blockIdx.x, blockIdx.y, blockIdx.z},
+        .gridDim = header_grid_dim,
+        .blockDim = header_block_dim,
+        .blockIdx = header_block_idx,
         .tileCoord = {ix, iy, iz},
-        .threadIdx = {threadIdx.x, threadIdx.y, threadIdx.z},
+        .threadIdx = header_thread_idx,
         .num_registers_per_thread = static_cast<uint16_t>(size(tCcD)),
         .mma_size = {get<0>(problem_shape), get<1>(problem_shape),
                      get<2>(problem_shape)},
@@ -318,6 +316,33 @@ CUTLASS_DEVICE void write_host_signal_header(
   // Release lock
   __threadfence();
   atomicExch(&host_signal_sync->global_lock, 0);
+}
+
+/// Write host signal header with atomic locking.
+/// TiledMma: The MMA type for computing thread coordinate partitions
+/// TileShape: The tile shape (bM, bN, bK) for the MMA operation
+/// ProblemShape: tuple of (M, N, K, R) or (M, N, K)
+/// BlockCoord: tuple of (ix, iy, iz) tile coordinates
+/// pow_target: uint32_t[8] PoW target for header
+template <typename TiledMma, typename TileShape, typename ProblemShape,
+          typename BlockCoord>
+CUTLASS_DEVICE void write_host_signal_header(
+    HostSignalSync* host_signal_sync,
+    HostSignalHeader* host_signal_header_pinned,
+    ProblemShape const& problem_shape, BlockCoord const& block_coord,
+    int thread_idx, const uint32_t* pow_target) {
+  cute::array<uint32_t, 3> const header_grid_dim = {gridDim.x, gridDim.y,
+                                                   gridDim.z};
+  cute::array<uint32_t, 3> const header_block_dim = {blockDim.x, blockDim.y,
+                                                    blockDim.z};
+  cute::array<uint32_t, 3> const header_block_idx = {blockIdx.x, blockIdx.y,
+                                                    blockIdx.z};
+  cute::array<uint32_t, 3> const header_thread_idx = {threadIdx.x, threadIdx.y,
+                                                     threadIdx.z};
+  write_host_signal_header_with_coords<TiledMma, TileShape>(
+      host_signal_sync, host_signal_header_pinned, problem_shape, block_coord,
+      thread_idx, pow_target, header_grid_dim, header_block_dim,
+      header_block_idx, header_thread_idx);
 }
 
 }  // namespace pearl

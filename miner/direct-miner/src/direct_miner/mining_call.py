@@ -38,6 +38,7 @@ from pearl_gateway.comm.dataclasses import MiningJob
 from pearl_gemm import (
     commitment_hash_from_merkle_roots,
     headless_mine,
+    headless_mine_split,
     make_pow_target_tensor,
     noise_gen,
     noisy_gemm,
@@ -223,6 +224,7 @@ def pearl_gemm_noisy_phase_c(
     kernel_swizzle: int | None = None,
     kernel_swizzle_n_maj: bool = True,
     pow_diagnostics: torch.Tensor | None = None,
+    use_transcript_kernel: bool = False,
 ) -> tuple[torch.Tensor | None, bool, torch.cuda.Event]:
     """Phase C multi-stream cached call.
 
@@ -493,38 +495,78 @@ def pearl_gemm_noisy_phase_c(
                 pow_diagnostics[1:2].fill_(torch.iinfo(torch.uint32).max)
 
             if mine_only:
-                headless_mine(
-                    A=slot.A,
-                    B=B,
-                    EAL=slot.EAL,
-                    EAL_fp16=slot.EAL_fp16,
-                    EBR=EBR,
-                    EBR_fp16=EBR_fp16,
-                    EAR_R_major=slot.EAR_R_major,
-                    EBL_R_major=EBL_R_major,
-                    EAR_K_major=slot.EAR_K_major,
-                    EBL_K_major=EBL_K_major,
-                    AxEBL_fp16=slot.A_E_BL,
-                    EARxBpEB_fp16=slot.EARxBpEB,
-                    ApEA=slot.ApEA,
-                    BpEB=BpEB,
-                    host_signal_header_pinned=host_signal_header_pinned,
-                    host_signal_sync=slot.host_signal_sync,
-                    pow_target=pow_target_tensor,
-                    pow_key=slot.commitment_hash_A.view(torch.uint32),
-                    tile_size_m=kernel_tile_size_m,
-                    tile_size_n=kernel_tile_size_n,
-                    tile_size_k=kernel_tile_size_k,
-                    cluster_size_m=kernel_cluster_size_m,
-                    cluster_size_n=kernel_cluster_size_n,
-                    pipeline_stages=kernel_pipeline_stages,
-                    mma_registers=kernel_mma_registers,
-                    swizzle=kernel_swizzle,
-                    swizzle_n_maj=kernel_swizzle_n_maj,
-                    run_noising_A=True,
-                    run_noising_B=run_noising_B,
-                    pow_diagnostics=pow_diagnostics,
-                )
+                if use_transcript_kernel:
+                    if slot.transcript_buffer is None:
+                        raise RuntimeError(
+                            "transcript kernel requested but slot has no "
+                            "transcript_buffer"
+                        )
+                    headless_mine_split(
+                        A=slot.A,
+                        B=B,
+                        EAL=slot.EAL,
+                        EAL_fp16=slot.EAL_fp16,
+                        EBR=EBR,
+                        EBR_fp16=EBR_fp16,
+                        EAR_R_major=slot.EAR_R_major,
+                        EBL_R_major=EBL_R_major,
+                        EAR_K_major=slot.EAR_K_major,
+                        EBL_K_major=EBL_K_major,
+                        AxEBL_fp16=slot.A_E_BL,
+                        EARxBpEB_fp16=slot.EARxBpEB,
+                        ApEA=slot.ApEA,
+                        BpEB=BpEB,
+                        host_signal_header_pinned=host_signal_header_pinned,
+                        host_signal_sync=slot.host_signal_sync,
+                        pow_target=pow_target_tensor,
+                        pow_key=slot.commitment_hash_A.view(torch.uint32),
+                        transcript_buffer=slot.transcript_buffer,
+                        tile_size_m=kernel_tile_size_m,
+                        tile_size_n=kernel_tile_size_n,
+                        tile_size_k=kernel_tile_size_k,
+                        cluster_size_m=kernel_cluster_size_m,
+                        cluster_size_n=kernel_cluster_size_n,
+                        pipeline_stages=kernel_pipeline_stages,
+                        mma_registers=kernel_mma_registers,
+                        swizzle=kernel_swizzle,
+                        swizzle_n_maj=kernel_swizzle_n_maj,
+                        run_noising_A=True,
+                        run_noising_B=run_noising_B,
+                        pow_diagnostics=pow_diagnostics,
+                    )
+                else:
+                    headless_mine(
+                        A=slot.A,
+                        B=B,
+                        EAL=slot.EAL,
+                        EAL_fp16=slot.EAL_fp16,
+                        EBR=EBR,
+                        EBR_fp16=EBR_fp16,
+                        EAR_R_major=slot.EAR_R_major,
+                        EBL_R_major=EBL_R_major,
+                        EAR_K_major=slot.EAR_K_major,
+                        EBL_K_major=EBL_K_major,
+                        AxEBL_fp16=slot.A_E_BL,
+                        EARxBpEB_fp16=slot.EARxBpEB,
+                        ApEA=slot.ApEA,
+                        BpEB=BpEB,
+                        host_signal_header_pinned=host_signal_header_pinned,
+                        host_signal_sync=slot.host_signal_sync,
+                        pow_target=pow_target_tensor,
+                        pow_key=slot.commitment_hash_A.view(torch.uint32),
+                        tile_size_m=kernel_tile_size_m,
+                        tile_size_n=kernel_tile_size_n,
+                        tile_size_k=kernel_tile_size_k,
+                        cluster_size_m=kernel_cluster_size_m,
+                        cluster_size_n=kernel_cluster_size_n,
+                        pipeline_stages=kernel_pipeline_stages,
+                        mma_registers=kernel_mma_registers,
+                        swizzle=kernel_swizzle,
+                        swizzle_n_maj=kernel_swizzle_n_maj,
+                        run_noising_A=True,
+                        run_noising_B=run_noising_B,
+                        pow_diagnostics=pow_diagnostics,
+                    )
             else:
                 if slot.C is None:
                     raise RuntimeError("slot.C is required when mine_only=False")

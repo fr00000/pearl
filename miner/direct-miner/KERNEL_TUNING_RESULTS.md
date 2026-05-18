@@ -1611,3 +1611,71 @@ After pruning the one-producer probe, the H100 benchmark clone rebuilt cleanly:
 ```text
 /workspace/build-logs/h100-pruned-one-producer-final-parallel-20260518-162706.log
 ```
+
+### Split Transcript/Checker Kernel Probe
+
+On 2026-05-18 we tested a larger architectural split intended to answer a
+specific question: is the inline BLAKE3/target check inside `hopper_mine_ws`
+the register or latency ceiling?
+
+Implementation:
+
+- Add an opt-in `headless_mine_split` CUDA op.
+- Launch a transcript producer kernel that runs the same WGMMA transcript
+  mainloop but writes one 16-word transcript per MMA consumer thread to global
+  memory.
+- Launch a second checker kernel that reads those transcripts, runs the keyed
+  BLAKE3 compression and target comparison, and writes the same
+  `HostSignalHeader` fields used by the gateway proof path.
+- Wire direct-miner behind `--enable-transcript-kernel`; production remains on
+  the existing inline `headless_mine` path unless this flag is set.
+
+Correctness smoke:
+
+```bash
+uv run direct-miner-inspect-pattern \
+  --tile-m 128 --tile-n 256 --tile-k 128 \
+  --cluster-m 2 --cluster-n 1 \
+  --stages 3 --mma-registers 160 \
+  --k 2048 --iterations 2 \
+  --enable-transcript-kernel
+```
+
+Result:
+
+```text
+PATTERN_COMPATIBLE=true
+rows=[0, 8]
+cols=[0, 1, 8, 9, ..., 248, 249]
+```
+
+Static resource usage from the H100 build:
+
+| Kernel | Resource usage |
+|---|---|
+| `hopper_mine_ws` production config | `REG:160 STACK:64 SHARED:1024` |
+| `hopper_mine_transcript_ws` producer | `REG:160 STACK:64 SHARED:1024` |
+| `hopper_mine_transcript_check` checker | `REG:40-48 STACK:0 SHARED:1024` |
+
+Matched production-shape benchmark, both with
+`m=8192 n=1048576 k=32768 max_in_flight=1 b-cache headless cluster=2x1
+stages=3 regs=160 swizzle=8`:
+
+| Path | Normalized attempts/s | Chance-weighted/s | Result |
+|---|---:|---:|---|
+| Inline `headless_mine` | 657,717 | 21.552B | reference |
+| Split transcript/check | 645,025 | 21.136B | -1.9% |
+
+Logs:
+
+```text
+/workspace/logs/transcript-bench-standard-20260518-214700.log
+/workspace/logs/transcript-bench-split-20260518-214700.log
+```
+
+Decision: reject for production. The split checker is correct, but it does not
+reduce producer register pressure at the production config, and it adds a large
+global-memory transcript write plus a second kernel launch. This rules out
+"move BLAKE3/check out of the main kernel" as a near-term H100 speedup. The
+remaining large path is still a true live-state rewrite inside the WGMMA
+producer/consumer mainloop, not a post-mainloop checker split.

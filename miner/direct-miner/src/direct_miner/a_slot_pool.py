@@ -52,6 +52,7 @@ class ASlot:
     C: Optional[torch.Tensor]             # (m, n) bf16 output; None for headless
     host_signal_sync: torch.Tensor        # (host_signal_sync_size,) int8
     pow_diagnostics: Optional[torch.Tensor]  # uint32 kernel hash stats
+    transcript_buffer: Optional[torch.Tensor]  # uint32 split-kernel transcripts
     tensor_hash_scratchpad: torch.Tensor  # uint8
 
 
@@ -78,6 +79,7 @@ class ASlotPool:
         host_signal_sync_size: int,
         scratchpad_bytes: int,
         pow_diagnostics_size: int | None = None,
+        transcript_buffer_words: int | None = None,
         device: torch.device | str = "cuda",
         out_dtype: torch.dtype = torch.bfloat16,
         allocate_c: bool = True,
@@ -118,6 +120,15 @@ class ASlotPool:
                     if pow_diagnostics_size is not None
                     else None
                 ),
+                transcript_buffer=(
+                    torch.empty(
+                        (transcript_buffer_words,),
+                        dtype=torch.uint32,
+                        device=device,
+                    )
+                    if transcript_buffer_words is not None
+                    else None
+                ),
                 tensor_hash_scratchpad=torch.empty(
                     scratchpad_bytes, dtype=torch.uint8, device=device
                 ),
@@ -150,6 +161,7 @@ class ASlotPool:
             + (m * n * 2 if allocate_c else 0)      # C bf16
             + host_signal_sync_size                 # sync int8
             + ((pow_diagnostics_size or 0) * 4)      # diagnostics uint32
+            + ((transcript_buffer_words or 0) * 4)   # split-kernel transcripts
             + scratchpad_bytes                      # scratchpad uint8
         )
         total_mb = per_slot_bytes * num_slots / 1024 / 1024

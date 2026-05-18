@@ -89,6 +89,8 @@ struct CollectiveMainloop {
     PowDiagnostics* pow_diagnostics;
     uint32_t const* ptr_pow_target;
     uint32_t const* ptr_pow_key;
+    uint32_t* ptr_transcript_buffer;
+    int64_t transcript_buffer_words;
   };
 
   struct Params {
@@ -105,6 +107,8 @@ struct CollectiveMainloop {
     PowDiagnostics* pow_diagnostics;
     uint32_t const* ptr_pow_target;
     uint32_t const* ptr_pow_key;
+    uint32_t* ptr_transcript_buffer;
+    int64_t transcript_buffer_words;
   };
 
   static Params to_underlying_arguments(Arguments const& args) {
@@ -137,7 +141,9 @@ struct CollectiveMainloop {
             .inner_hash_counter = args.inner_hash_counter,
             .pow_diagnostics = args.pow_diagnostics,
             .ptr_pow_target = args.ptr_pow_target,
-            .ptr_pow_key = args.ptr_pow_key};
+            .ptr_pow_key = args.ptr_pow_key,
+            .ptr_transcript_buffer = args.ptr_transcript_buffer,
+            .transcript_buffer_words = args.transcript_buffer_words};
   }
 
   /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance

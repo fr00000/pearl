@@ -84,6 +84,13 @@ class MinerConfig:
     # to the PoW check path.
     enable_kernel_hash_stats: bool = False
 
+    # Research-only split mining path. The main kernel writes every 16-word
+    # transcript to global memory and a second kernel runs BLAKE3/target
+    # checks. This is intentionally opt-in because it allocates a very large
+    # transcript buffer and is only useful for proving whether check/hashing
+    # pressure is the current bottleneck.
+    enable_transcript_kernel: bool = False
+
     # Main mining kernel launch parameters. These are separate from
     # MiningConfiguration: changing cluster/stage values should not
     # change proof semantics, while changing tile sizes must be treated

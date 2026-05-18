@@ -21,8 +21,11 @@ from pearl_gemm import (
     get_host_signal_header_size,
     get_host_signal_sync_size,
     headless_mine,
+    headless_mine_split,
     noise_gen,
 )
+
+from .attempt_metrics import transcript_words_per_matmul
 
 
 def _normalize(indices: list[int]) -> list[int]:
@@ -112,8 +115,29 @@ def inspect_once(args, iteration: int) -> PatternResult:
         (get_host_signal_sync_size(),), dtype=torch.int8, device=device
     )
     pow_target = torch.full((8,), 0xFFFFFFFF, dtype=torch.uint32, device=device)
+    transcript_buffer = None
+    if args.enable_transcript_kernel:
+        transcript_buffer = torch.empty(
+            (
+                transcript_words_per_matmul(
+                    m=m,
+                    n=n,
+                    tile_m=args.tile_m,
+                    tile_n=args.tile_n,
+                    cluster_m=args.cluster_m,
+                    cluster_n=args.cluster_n,
+                ),
+            ),
+            dtype=torch.uint32,
+            device=device,
+        )
 
-    headless_mine(
+    mine_fn = headless_mine_split if args.enable_transcript_kernel else headless_mine
+    mine_kwargs = {}
+    if transcript_buffer is not None:
+        mine_kwargs["transcript_buffer"] = transcript_buffer
+
+    mine_fn(
         A=A,
         B=B,
         EAL=EAL,
@@ -132,6 +156,7 @@ def inspect_once(args, iteration: int) -> PatternResult:
         host_signal_sync=host_signal_sync,
         pow_target=pow_target,
         pow_key=key_A.view(torch.uint32),
+        **mine_kwargs,
         tile_size_m=args.tile_m,
         tile_size_n=args.tile_n,
         tile_size_k=args.tile_k,
@@ -192,6 +217,7 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=4)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--enable-transcript-kernel", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 

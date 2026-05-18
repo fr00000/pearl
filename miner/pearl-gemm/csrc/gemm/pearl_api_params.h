@@ -51,6 +51,12 @@ struct PearlAPIParams {
   // PoW target and key (uint256, LE word order)
   void const* __restrict__ ptr_pow_target;  // uint32_t[8]
   void const* __restrict__ ptr_pow_key;     // uint32_t[8]
+
+  // Optional split mining transcript buffer. When non-null, the producer
+  // kernel writes one 16-word BLAKE3 transcript per MMA consumer thread and a
+  // follow-up checker kernel compresses those transcripts into PoW hashes.
+  void* __restrict__ ptr_transcript_buffer;  // uint32_t[]
+  int64_t transcript_buffer_words;
 };
 
 struct Noise_gen_params {

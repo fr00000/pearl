@@ -68,6 +68,12 @@ def main():
              "Adds atomics to the PoW path, so leave off for production."
     )
     parser.add_argument(
+        "--enable-transcript-kernel", action="store_true",
+        help="research-only split mining path: write transcripts from the "
+             "main kernel and check them in a second kernel. Allocates a "
+             "large transcript buffer; benchmark with low max-in-flight."
+    )
+    parser.add_argument(
         "--kernel-tile-m", type=int, default=128,
         help="main mining kernel tile M dimension"
     )
@@ -121,6 +127,7 @@ def main():
         enable_diagnostics=args.enable_diagnostics,
         enable_headless_kernel=args.enable_headless_kernel,
         enable_kernel_hash_stats=args.enable_kernel_hash_stats,
+        enable_transcript_kernel=args.enable_transcript_kernel,
         kernel_tile_size_m=args.kernel_tile_m,
         kernel_tile_size_n=args.kernel_tile_n,
         kernel_tile_size_k=args.kernel_tile_k,

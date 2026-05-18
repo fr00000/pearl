@@ -23,6 +23,25 @@ def outer_tiles_per_matmul(
     return math.ceil(m / tile_m) * math.ceil(n / tile_n)
 
 
+def rounded_outer_tiles_per_matmul(
+    *,
+    m: int,
+    n: int,
+    tile_m: int,
+    tile_n: int,
+    cluster_m: int,
+    cluster_n: int,
+) -> int:
+    """Return outer CTAs including cluster-padding tiles."""
+    if cluster_m <= 0 or cluster_n <= 0:
+        raise ValueError("cluster dimensions must be positive")
+    blocks_m = math.ceil(m / tile_m)
+    blocks_n = math.ceil(n / tile_n)
+    rounded_m = math.ceil(blocks_m / cluster_m) * cluster_m
+    rounded_n = math.ceil(blocks_n / cluster_n) * cluster_n
+    return rounded_m * rounded_n
+
+
 def mma_consumer_threads_per_cta(*, tile_m: int) -> int:
     """Return the number of per-CTA MMA threads that check PoW.
 
@@ -33,6 +52,30 @@ def mma_consumer_threads_per_cta(*, tile_m: int) -> int:
     if tile_m <= 0 or tile_m % 64 != 0:
         raise ValueError("tile_m must be a positive multiple of 64")
     return (tile_m // 64) * 128
+
+
+def transcript_words_per_matmul(
+    *,
+    m: int,
+    n: int,
+    tile_m: int,
+    tile_n: int,
+    cluster_m: int,
+    cluster_n: int,
+) -> int:
+    """Return uint32 words needed by the split transcript mining path."""
+    return (
+        rounded_outer_tiles_per_matmul(
+            m=m,
+            n=n,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            cluster_m=cluster_m,
+            cluster_n=cluster_n,
+        )
+        * mma_consumer_threads_per_cta(tile_m=tile_m)
+        * 16
+    )
 
 
 def normalized_attempt_scale(*, tile_m: int) -> float:

@@ -371,6 +371,8 @@ def noisy_gemm(
     inner_hash_counter: torch.Tensor | None = None,
     enable_debug: bool = False,
     pow_diagnostics: torch.Tensor | None = None,
+    transcript_buffer: torch.Tensor | None = None,
+    split_transcript_check: bool = False,
 ):
     """Perform noising, matmul, and denoising.
 
@@ -506,6 +508,8 @@ def noisy_gemm(
         inner_hash_counter,
         enable_debug,
         pow_diagnostics,
+        transcript_buffer,
+        split_transcript_check,
     )
 
 
@@ -600,6 +604,99 @@ def headless_mine(
     )
 
 
+def headless_mine_split(
+    A,  # m x k
+    B,  # n x k
+    EAL,  # m x r
+    EAL_fp16,
+    EBR,  # n x r
+    EBR_fp16,
+    EAR_R_major,  # k x r
+    EBL_R_major,  # k x r
+    EAR_K_major,  # r x k
+    EBL_K_major,  # r x k
+    AxEBL_fp16,  # m x r
+    EARxBpEB_fp16,  # n x r
+    ApEA,  # m x k
+    BpEB,  # n x k
+    host_signal_header_pinned,  # host_signal_header_size
+    host_signal_sync,  # host_signal_sync_size
+    pow_target: torch.Tensor,  # (8,) uint32, PoW target
+    pow_key: torch.Tensor,  # (8,) uint32, PoW key
+    transcript_buffer: torch.Tensor,  # uint32 transcript buffer
+    AxEBL_int32=None,  # m x r
+    EARxBpEB_int32=None,  # n x r
+    tile_size_m: int = 128,
+    tile_size_n: int = 256,
+    tile_size_k: int = 128,
+    cluster_size_m: int = 1,
+    cluster_size_n: int = 1,
+    pipeline_stages: int | None = None,
+    mma_registers: int | None = None,
+    swizzle: int | None = None,
+    swizzle_n_maj: bool = True,
+    tile_size_m_noising_A: int | None = None,
+    tile_size_n_noising_B: int | None = None,
+    tile_size_k_noising_A: int | None = None,
+    tile_size_k_noising_B: int | None = None,
+    pipeline_stages_noising_A: int = 2,
+    pipeline_stages_noising_B: int = 2,
+    k_blocks_per_split_noising_A: int | None = None,
+    k_blocks_per_split_noising_B: int | None = None,
+    run_noising_A: bool = True,
+    run_noising_B: bool = True,
+    inner_hash_counter: torch.Tensor | None = None,
+    enable_debug: bool = False,
+    pow_diagnostics: torch.Tensor | None = None,
+):
+    """Run headless mining as transcript producer + separate PoW checker."""
+    pearl_gemm_cuda.headless_mine_split(
+        A,
+        B,
+        EAL,
+        EAL_fp16,
+        EBR,
+        EBR_fp16,
+        EAR_R_major,
+        EBL_R_major,
+        EAR_K_major,
+        EBL_K_major,
+        AxEBL_fp16,
+        EARxBpEB_fp16,
+        ApEA,
+        BpEB,
+        host_signal_header_pinned,
+        host_signal_sync,
+        pow_target,
+        pow_key,
+        transcript_buffer,
+        AxEBL_int32,
+        EARxBpEB_int32,
+        tile_size_m,
+        tile_size_n,
+        tile_size_k,
+        cluster_size_m,
+        cluster_size_n,
+        pipeline_stages,
+        mma_registers,
+        swizzle,
+        swizzle_n_maj,
+        tile_size_m_noising_A,
+        tile_size_n_noising_B,
+        tile_size_k_noising_A,
+        tile_size_k_noising_B,
+        pipeline_stages_noising_A,
+        pipeline_stages_noising_B,
+        k_blocks_per_split_noising_A,
+        k_blocks_per_split_noising_B,
+        run_noising_A,
+        run_noising_B,
+        inner_hash_counter,
+        enable_debug,
+        pow_diagnostics,
+    )
+
+
 # Fake Tensor function for torch.compile support
 @torch.library.register_fake("pearl_gemm::noisy_gemm")
 def _abstract_noisy_gemm(
@@ -651,6 +748,8 @@ def _abstract_noisy_gemm(
     inner_hash_counter=None,
     enable_debug=False,
     pow_diagnostics=None,
+    transcript_buffer=None,
+    split_transcript_check=False,
 ):
     return None
 
@@ -675,6 +774,55 @@ def _abstract_headless_mine(
     host_signal_sync,
     pow_target,
     pow_key,
+    AxEBL_int32=None,
+    EARxBpEB_int32=None,
+    tile_size_m=128,
+    tile_size_n=256,
+    tile_size_k=128,
+    cluster_size_m=1,
+    cluster_size_n=1,
+    pipeline_stages=None,
+    mma_registers=None,
+    swizzle=None,
+    swizzle_n_maj=True,
+    tile_size_m_noising_A=None,
+    tile_size_n_noising_B=None,
+    tile_size_k_noising_A=None,
+    tile_size_k_noising_B=None,
+    pipeline_stages_noising_A=2,
+    pipeline_stages_noising_B=2,
+    k_blocks_per_split_noising_A=None,
+    k_blocks_per_split_noising_B=None,
+    run_noising_A=True,
+    run_noising_B=True,
+    inner_hash_counter=None,
+    enable_debug=False,
+    pow_diagnostics=None,
+):
+    return None
+
+
+@torch.library.register_fake("pearl_gemm::headless_mine_split")
+def _abstract_headless_mine_split(
+    A,
+    B,
+    EAL,
+    EAL_fp16,
+    EBR,
+    EBR_fp16,
+    EAR_R_major,
+    EBL_R_major,
+    EAR_K_major,
+    EBL_K_major,
+    AxEBL_fp16,
+    EARxBpEB_fp16,
+    ApEA,
+    BpEB,
+    host_signal_header_pinned,
+    host_signal_sync,
+    pow_target,
+    pow_key,
+    transcript_buffer,
     AxEBL_int32=None,
     EARxBpEB_int32=None,
     tile_size_m=128,
