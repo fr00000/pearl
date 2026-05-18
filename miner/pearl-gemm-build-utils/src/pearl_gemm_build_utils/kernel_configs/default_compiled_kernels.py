@@ -173,6 +173,24 @@ for cM, cN, mma_registers in [
         mma_registers=mma_registers,
     )
 
+# Temporary live-state boundary probe. The streaming XOR reducer may reduce
+# enough accumulator-side temporary pressure to make the 192-row geometry
+# compile. It is only worth benchmarking if PTXAS accepts this shape.
+for cM, cN, mma_registers in [
+    (1, 1, 160),
+    (2, 1, 160),
+]:
+    _add_matmul_kernel(
+        tile_size_m=192,
+        tile_size_n=256,
+        tile_size_k=128,
+        R=128,
+        pipeline_stages=3,
+        cM=cM,
+        cN=cN,
+        mma_registers=mma_registers,
+    )
+
 # Noising A: 64x64, fp16/int32
 _noising_a_kernels = [
     NoisingAKernelConfig(
