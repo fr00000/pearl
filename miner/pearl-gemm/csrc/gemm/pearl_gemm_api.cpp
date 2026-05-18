@@ -950,7 +950,7 @@ void noisy_gemm(
           if (mine_only) {
             TORCH_CHECK(!skip_reduction,
                         "mine_only headless kernel requires skip_reduction=False");
-            MATMUL_CONFIG_SWITCH(
+            MINE_CONFIG_SWITCH(
                 bM, bN, bK, r, pipeline_stages, cM, cN, mma_registers,
                 kernel_found_matmul = true;
                 run_pearl_mine_<ElementOut, R_, bM_, bN_, bK_, stages_, cM_,

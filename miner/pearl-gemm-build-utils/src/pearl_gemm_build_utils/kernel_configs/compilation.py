@@ -27,6 +27,15 @@ class KernelCompilationGrid(BaseModel):
         default_factory=list, description="GEMM/matmul kernel configurations to compile"
     )
 
+    mine_only_matmul_kernels: list[MatmulKernelConfig] = Field(
+        default_factory=list,
+        description=(
+            "Headless mining-only matmul configurations to compile. These are "
+            "visible only to mine_only dispatch and do not instantiate the full "
+            "GEMM/denoising template path."
+        ),
+    )
+
     noising_a_kernels: list[NoisingAKernelConfig] = Field(
         default_factory=list, description="Noising A kernel configurations to compile"
     )

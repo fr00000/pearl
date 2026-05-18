@@ -15,6 +15,8 @@ from pearl_gemm_build_utils.kernel_configs import (
 # Build matmul kernels.
 _matmul_kernels = []
 _matmul_kernel_keys = set()
+_mine_only_matmul_kernels = []
+_mine_only_matmul_kernel_keys = set()
 
 
 def _add_matmul_kernel(
@@ -42,6 +44,44 @@ def _add_matmul_kernel(
         return
     _matmul_kernel_keys.add(key)
     _matmul_kernels.append(
+        MatmulKernelConfig(
+            tile_size_m=tile_size_m,
+            tile_size_n=tile_size_n,
+            tile_size_k=tile_size_k,
+            R=R,
+            pipeline_stages=pipeline_stages,
+            cM=cM,
+            cN=cN,
+            mma_registers=mma_registers,
+        )
+    )
+
+
+def _add_mine_only_matmul_kernel(
+    *,
+    tile_size_m: int = 128,
+    tile_size_n: int = 256,
+    tile_size_k: int = 128,
+    R: int = 128,
+    pipeline_stages: int = 3,
+    cM: int = 1,
+    cN: int = 1,
+    mma_registers: int = 0,
+) -> None:
+    key = (
+        tile_size_m,
+        tile_size_n,
+        tile_size_k,
+        R,
+        pipeline_stages,
+        cM,
+        cN,
+        mma_registers,
+    )
+    if key in _matmul_kernel_keys or key in _mine_only_matmul_kernel_keys:
+        return
+    _mine_only_matmul_kernel_keys.add(key)
+    _mine_only_matmul_kernels.append(
         MatmulKernelConfig(
             tile_size_m=tile_size_m,
             tile_size_n=tile_size_n,
@@ -173,6 +213,29 @@ for cM, cN, mma_registers in [
         mma_registers=mma_registers,
     )
 
+# Headless-only wide-M probes. The ordinary GEMM instantiation path cannot
+# compile these today because the denoising/C-output template carries extra
+# live state. Mine-only dispatch skips that path, so these test whether the
+# headless kernel can run wider CTAs and reduce scheduler/control overhead.
+for tile_size_m, cM, cN, mma_registers in [
+    (192, 1, 1, 160),
+    (192, 2, 1, 160),
+    (192, 1, 1, 192),
+    (192, 2, 1, 192),
+    (256, 1, 1, 160),
+    (256, 2, 1, 160),
+]:
+    _add_mine_only_matmul_kernel(
+        tile_size_m=tile_size_m,
+        tile_size_n=256,
+        tile_size_k=128,
+        R=128,
+        pipeline_stages=3,
+        cM=cM,
+        cN=cN,
+        mma_registers=mma_registers,
+    )
+
 # Noising A: 64x64, fp16/int32
 _noising_a_kernels = [
     NoisingAKernelConfig(
@@ -201,6 +264,7 @@ _noising_b_kernels = [
 
 KERNEL_CONFIGS = KernelCompilationGrid(
     matmul_kernels=_matmul_kernels,
+    mine_only_matmul_kernels=_mine_only_matmul_kernels,
     noising_a_kernels=_noising_a_kernels,
     noising_b_kernels=_noising_b_kernels,
 )

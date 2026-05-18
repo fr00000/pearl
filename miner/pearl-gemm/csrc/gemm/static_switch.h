@@ -170,5 +170,6 @@
   } while (0)
 
 #include "static_switch_matmul.h"
+#include "static_switch_mine.h"
 #include "static_switch_noisingA.h"
 #include "static_switch_noisingB.h"

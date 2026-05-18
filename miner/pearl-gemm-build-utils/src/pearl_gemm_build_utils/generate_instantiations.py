@@ -134,6 +134,7 @@ def noising_B_decl(config: NoisingBKernelConfig) -> str:
 
 def generate_instantiations(
     matmul_kernels: list[MatmulKernelConfig],
+    mine_only_matmul_kernels: list[MatmulKernelConfig],
     noising_a_kernels: list[NoisingAKernelConfig],
     noising_b_kernels: list[NoisingBKernelConfig],
     output_dir: Path,
@@ -185,6 +186,32 @@ def generate_instantiations(
                             EnablePowDiagnostics,
                         )
                     )
+                for EnableDebug, EnablePowDiagnostics in itertools.product(
+                    ENABLE_DEBUG,
+                    ENABLE_POW_DIAGNOSTICS,
+                ):
+                    fh.write(
+                        mine_decl(
+                            config,
+                            out_type,
+                            EnableDebug,
+                            EnablePowDiagnostics,
+                        )
+                    )
+                fh.write(f"#endif // #if !defined(DISABLE_R{config.R})")
+
+    for config in mine_only_matmul_kernels:
+        for out_type in OUTPUT_TYPES:
+            regs_suffix = (
+                f"_regs{config.mma_registers}"
+                if config.mma_registers != 0
+                else ""
+            )
+            output_filename = f"mine_R{config.R}_{out_type}_{config.tile_size_m}x{config.tile_size_n}x{config.tile_size_k}_{config.pipeline_stages}stages_cluster{config.cM}x{config.cN}{regs_suffix}.cu"
+            output_file = Path(output_dir) / output_filename
+            with open(output_file, "w") as fh:
+                fh.write(f"#if !defined(DISABLE_R{config.R})")
+                fh.write("\n" + noisy_gemm_prelude())
                 for EnableDebug, EnablePowDiagnostics in itertools.product(
                     ENABLE_DEBUG,
                     ENABLE_POW_DIAGNOSTICS,

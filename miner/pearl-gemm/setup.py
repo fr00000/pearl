@@ -15,6 +15,7 @@ from packaging.version import Version, parse
 from pearl_gemm_build_utils.generate_instantiations import generate_instantiations
 from pearl_gemm_build_utils.write_static_switches import (
     write_matmul_switch,
+    write_mine_switch,
     write_noising_a_switch,
     write_noising_b_switch,
 )
@@ -133,6 +134,10 @@ config_module = importlib.import_module(
 kernel_configs = config_module.KERNEL_CONFIGS
 
 MATMUL_KERNELS = [k for k in kernel_configs.matmul_kernels if k.R in ENABLED_R_VALUES]
+MINE_ONLY_MATMUL_KERNELS = [
+    k for k in kernel_configs.mine_only_matmul_kernels if k.R in ENABLED_R_VALUES
+]
+MINE_SWITCH_KERNELS = list(dict.fromkeys([*MATMUL_KERNELS, *MINE_ONLY_MATMUL_KERNELS]))
 NOISING_A_KERNELS = [k for k in kernel_configs.noising_a_kernels if k.R in ENABLED_R_VALUES]
 NOISING_B_KERNELS = [k for k in kernel_configs.noising_b_kernels if k.R in ENABLED_R_VALUES]
 
@@ -355,11 +360,16 @@ if not SKIP_CUDA_BUILD:
         instantiations_dir = GEMM_DIR / "instantiations"
         print(f"Writing template instantiations to {instantiations_dir}")
         generate_instantiations(
-            MATMUL_KERNELS, NOISING_A_KERNELS, NOISING_B_KERNELS, instantiations_dir
+            MATMUL_KERNELS,
+            MINE_ONLY_MATMUL_KERNELS,
+            NOISING_A_KERNELS,
+            NOISING_B_KERNELS,
+            instantiations_dir,
         )
 
         print(f"Writing static switches to {GEMM_DIR}")
         write_matmul_switch(GEMM_DIR / "static_switch_matmul.h", MATMUL_KERNELS)
+        write_mine_switch(GEMM_DIR / "static_switch_mine.h", MINE_SWITCH_KERNELS)
         write_noising_a_switch(GEMM_DIR / "static_switch_noisingA.h", NOISING_A_KERNELS)
         write_noising_b_switch(GEMM_DIR / "static_switch_noisingB.h", NOISING_B_KERNELS)
 
@@ -391,6 +401,17 @@ if not SKIP_CUDA_BUILD:
     sources.extend(
         matmul_instantiation_source(cfg, out_type)
         for cfg in MATMUL_KERNELS
+        for out_type in OUTPUT_TYPES
+    )
+    sources.extend(
+        (
+            "csrc/gemm/instantiations/"
+            f"mine_R{cfg.R}_{out_type}_{cfg.tile_size_m}x{cfg.tile_size_n}x"
+            f"{cfg.tile_size_k}_{cfg.pipeline_stages}stages_cluster"
+            f"{cfg.cM}x{cfg.cN}"
+            f"{f'_regs{cfg.mma_registers}' if cfg.mma_registers != 0 else ''}.cu"
+        )
+        for cfg in MINE_ONLY_MATMUL_KERNELS
         for out_type in OUTPUT_TYPES
     )
     sources.extend(
