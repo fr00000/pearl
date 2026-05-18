@@ -173,6 +173,25 @@ for cM, cN, mma_registers in [
         mma_registers=mma_registers,
     )
 
+# Producer-consumer mine-only probe. This tile was not buildable with the
+# warp-specialized producer warpgroup because the 512-thread CTA forced the
+# register cap below the live-state requirement. The mine-only PC kernel uses
+# only MMA warpgroups, so 192x256x128 can be tested as a real geometry change.
+for cM, cN, mma_registers in [
+    (1, 1, 160),
+    (2, 1, 160),
+]:
+    _add_matmul_kernel(
+        tile_size_m=192,
+        tile_size_n=256,
+        tile_size_k=128,
+        R=128,
+        pipeline_stages=3,
+        cM=cM,
+        cN=cN,
+        mma_registers=mma_registers,
+    )
+
 # Noising A: 64x64, fp16/int32
 _noising_a_kernels = [
     NoisingAKernelConfig(

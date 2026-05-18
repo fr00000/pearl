@@ -59,7 +59,8 @@ struct KernelTraits {
   static constexpr int kNumMmaThreads = kNumMmaWarpgroups * 128;
   // Use one warp in producer warpgroup for TMA
   static constexpr int kNumProducerThreads = cutlass::NumThreadsPerWarp;
-  static constexpr int kNumThreads = kNumMmaThreads + 128;
+  static constexpr int kNumThreads =
+      MineOnly ? kNumMmaThreads : kNumMmaThreads + 128;
   static constexpr int kNumWarps = kNumThreads / cutlass::NumThreadsPerWarp;
   static constexpr int DefaultMmaRegisters =
       kNumWarps == 8 ? 256 : kNumWarps == 12 ? 240 : kNumWarps == 16 ? 160

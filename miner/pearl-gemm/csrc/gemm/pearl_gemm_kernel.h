@@ -429,4 +429,115 @@ __global__ void __launch_bounds__(
   }
 }
 
+template <typename KTraits, typename TileScheduler>
+__global__ void __launch_bounds__(
+    KTraits::kNumWarps* cutlass::NumThreadsPerWarp, 1)
+    hopper_mine_pc(CUTE_GRID_CONSTANT
+                   typename ::pearl::CollectiveMainloop<KTraits>::Params const
+                       mainloop_params,
+                   CUTE_GRID_CONSTANT
+                   typename TileScheduler::Params const scheduler_params) {
+
+  using TileShape_MNK = typename KTraits::TileShape_MNK;
+  using ClusterShape = typename KTraits::ClusterShape_MNK;
+
+  static constexpr int NumMmaThreads = size(typename KTraits::TiledMma{});
+  static constexpr int srcLane = KTraits::srcLane;
+
+  using CollectiveMainloop = ::pearl::CollectiveMainloop<KTraits>;
+  using MainloopPipeline = typename KTraits::MainloopPipeline;
+  using PipelineParams = typename MainloopPipeline::Params;
+  using PipelineState = typename MainloopPipeline::PipelineState;
+  using WorkTileInfo = typename TileScheduler::WorkTileInfo;
+
+  extern __shared__ char shared_memory[];
+  auto& shared_storage =
+      *reinterpret_cast<typename KTraits::SharedStorage*>(shared_memory);
+
+  int const lane_predicate = cute::elect_one_sync();
+  int const warp_idx = cutlass::canonical_warp_idx_sync();
+  bool const is_tma_loader_warp = warp_idx == 0;
+
+  if (is_tma_loader_warp && lane_predicate) {
+    CollectiveMainloop::prefetch_tma_descriptors(mainloop_params);
+  }
+
+  PipelineParams pipeline_params;
+  pipeline_params.transaction_bytes = CollectiveMainloop::TmaTransactionBytes;
+  pipeline_params.role =
+      is_tma_loader_warp ? MainloopPipeline::ThreadCategory::ProducerConsumer
+                         : MainloopPipeline::ThreadCategory::Consumer;
+  pipeline_params.is_leader = is_tma_loader_warp && lane_predicate;
+  pipeline_params.num_consumers = NumMmaThreads;
+  pipeline_params.num_producers = 1;
+
+  MainloopPipeline pipeline(shared_storage.pipeline, pipeline_params,
+                            ClusterShape{});
+
+  CollectiveMainloop collective_mainloop;
+  const int k_tile_count =
+      cutlass::ceil_div(shape<1>(mainloop_params.layout_A), KTraits::bK);
+
+  if constexpr (size(ClusterShape{}) > 1) {
+    cute::cluster_arrive_relaxed();
+    cute::cluster_wait();
+  } else {
+    __syncthreads();
+  }
+
+  static_assert(KTraits::kNumWarps == 4 || KTraits::kNumWarps == 8 ||
+                KTraits::kNumWarps == 12 || KTraits::kNumWarps == 16);
+  cutlass::arch::warpgroup_reg_alloc<KTraits::MmaRegisters>();
+
+  TileScheduler scheduler{};
+  typename KTraits::TiledMma tiled_mma;
+  int consumer_tix = static_cast<int>(threadIdx.x);
+
+  WorkTileInfo work_tile_info = scheduler.get_initial_work(scheduler_params);
+  CUTLASS_PRAGMA_NO_UNROLL
+  while (work_tile_info.is_valid(scheduler_params)) {
+    Tensor tCrC = partition_fragment_C(tiled_mma, select<0, 1>(TileShape_MNK{}));
+    clear(tCrC);
+
+    auto transcript_extraction_tensor =
+        make_tensor<uint32_t>(Int<blake3::MSG_BLOCK_SIZE_U32>{});
+    clear(transcript_extraction_tensor);
+
+    PipelineState smem_pipe_read;
+    PipelineState smem_pipe_write =
+        cutlass::make_producer_start_state<MainloopPipeline>();
+
+    cute::tuple<int32_t, int32_t, int32_t> block_coord =
+        work_tile_info.template get_block_coord<ClusterShape>(
+            scheduler_params);
+
+    uint16_t const tma_mcast_mask_a = create_tma_multicast_mask<1>(
+        Layout<ClusterShape>{}, block_id_in_cluster());
+    uint16_t const tma_mcast_mask_b = create_tma_multicast_mask<0>(
+        Layout<ClusterShape>{}, block_id_in_cluster());
+
+    collective_mainloop.mma_producer_consumer(
+        mainloop_params, pipeline, smem_pipe_read, smem_pipe_write, tCrC,
+        transcript_extraction_tensor, consumer_tix, shared_storage, block_coord,
+        k_tile_count, tma_mcast_mask_a, tma_mcast_mask_b, is_tma_loader_warp);
+
+    bool local_block_found =
+        check_pow_target<KTraits::EnablePowDiagnostics>(
+            transcript_extraction_tensor, mainloop_params.ptr_pow_target,
+            mainloop_params.ptr_pow_key, mainloop_params.pow_diagnostics,
+            block_coord, consumer_tix);
+
+    if (local_block_found) {
+      write_host_signal_header<typename KTraits::TiledMma, TileShape_MNK>(
+          mainloop_params.host_signal_sync,
+          mainloop_params.host_signal_header_pinned,
+          mainloop_params.problem_shape, block_coord, consumer_tix,
+          mainloop_params.ptr_pow_target);
+    }
+
+    work_tile_info = scheduler.template get_next_work</*IsProducer=*/false>(
+        scheduler_params, work_tile_info);
+  }
+}
+
 }  // namespace pearl

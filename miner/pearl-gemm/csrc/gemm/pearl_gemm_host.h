@@ -198,7 +198,7 @@ void run_pearl_mine(PearlAPIParams const& params, cudaStream_t stream = 0) {
   int device;
   cudaGetDevice(&device);
 
-  void* kernel = (void*)pearl::hopper_mine_ws<KTraits, Scheduler>;
+  void* kernel = (void*)pearl::hopper_mine_pc<KTraits, Scheduler>;
   int smem_size = sizeof(typename KTraits::SharedStorage);
   if (smem_size >= 48 * 1024) {
     int max_smem_per_block;
