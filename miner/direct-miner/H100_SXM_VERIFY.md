@@ -162,6 +162,33 @@ All variants passed the forced-win pattern inspector. Decision: keep `regs160`
 and remove the extra compile variants; the current production kernel does not
 gain meaningful occupancy from a lower explicit MMA register budget.
 
+### 2026-05-18 tile-M 192 and rank-64 boundary probes
+
+Pod artifacts:
+
+```text
+/workspace/build-logs/h100-m192-uv-sync-20260518-102114.log
+/workspace/sweeps/h100-r64-c1x1-20260518-103145.log
+```
+
+The remaining config-only tile-M geometry, `192x256x128`, failed at build time:
+
+```text
+ptxas fatal: (C7602) Insufficient registers (128)
+Try to compile with register target of 154 or higher.
+```
+
+This happened even for `c1x1 regs112/128/144`. The 192-row tile launches 512
+threads per CTA (`384` MMA consumers plus the current 128-thread producer
+warpgroup), so the register cap is below the live-state target. Like the earlier
+`tile_m=256` failure, this needs a real mine-only pipeline rewrite, not another
+launch-config knob.
+
+Rank 64 also passed pattern inspection, but a quick `8192 x 524288 x 16384`
+runtime probe with the already-compiled `R64 c1x1` kernel reached only about
+`17.66B` chance-weighted/s versus the current production `~21.52B/s`. Rank 64
+does not look competitive without a separate large kernel win.
+
 ### 2026-05-18 PoW hot-path micro-optimizations
 
 Pod artifacts:

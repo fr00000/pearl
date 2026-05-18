@@ -72,12 +72,6 @@ VARIANTS=(
     "k256_s2_c1x1|128|256|256|2|1|1||tile_k_probe"
     "k256_s2_c2x1_regs160|128|256|256|2|2|1|160|tile_k_probe"
     "k256_s2_c2x1_regs192|128|256|256|2|2|1|192|tile_k_probe"
-    "m192_s3_c1x1_regs112|192|256|128|3|1|1|112|tile_m_probe"
-    "m192_s3_c1x1_regs128|192|256|128|3|1|1|128|tile_m_probe"
-    "m192_s3_c1x1_regs144|192|256|128|3|1|1|144|tile_m_probe"
-    "m192_s3_c2x1_regs112|192|256|128|3|2|1|112|tile_m_probe"
-    "m192_s3_c2x1_regs128|192|256|128|3|2|1|128|tile_m_probe"
-    "m192_s3_c2x1_regs144|192|256|128|3|2|1|144|tile_m_probe"
     "m64_s3_c1x1|64|256|128|3|1|1||normalization_guard"
     "m64_s3_c2x1|64|256|128|3|2|1||normalization_guard"
 )

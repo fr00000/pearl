@@ -209,6 +209,61 @@ Decision: keep `regs160`. Lowering `warpgroup_reg_alloc` does not produce a
 material occupancy win for the current `128x256x128 c2x1` mine kernel, so the
 extra compile variants were removed again.
 
+### Tile-M 192 geometry probe
+
+Pod artifact:
+
+```text
+/workspace/build-logs/h100-m192-uv-sync-20260518-102114.log
+```
+
+We tested the largest remaining config-only tile-M geometry between the known
+points:
+
+- `tile_m=64`: buildable, but half the PoW-checking MMA consumers per CTA.
+- `tile_m=128`: current production.
+- `tile_m=192`: three MMA warpgroups, 384 PoW-checking consumers per CTA.
+- `tile_m=256`: previously rejected by PTXAS/register budget.
+
+Result: `tile_m=192` is not viable as a config-only change. Even the lower
+`c1x1 regs112/128/144` variants failed PTXAS:
+
+```text
+ptxas fatal: (C7602) Insufficient registers (128)
+Try to compile with register target of 154 or higher.
+```
+
+The 192-row CTA has 512 threads (`384` consumers + `128` producer-warpgroup
+threads), so the hardware register cap per thread is too low for the current
+live accumulator/transcript state. This reinforces the same boundary as
+`tile_m=256`: larger tile-M requires a real mine-only producer/pipeline rewrite
+that removes the mostly idle producer warpgroup and/or cuts accumulator live
+state. It cannot be unlocked by another `mma_registers` flag.
+
+### Rank-64 protocol/config probe
+
+Pod artifact:
+
+```text
+/workspace/sweeps/h100-r64-c1x1-20260518-103145.log
+```
+
+We also checked whether reducing `MINER_NOISE_RANK` from `128` to `64` could
+recover enough setup/noising cost to beat the current `k=32768` production
+shape. Rank 64 passed the forced-win pattern inspector, but protocol sanity
+caps the comparable 8 GiB-B shape at `k=16384`.
+
+Quick runtime probe:
+
+| Config | Normalized attempts/s | Chance-weighted/s | Result |
+|---|---:|---:|---|
+| `rank64, 8192x524288x16384, c1x1` | ~1,078,000 | ~17.66B | reject |
+| current production `rank128, 8192x262144x32768, c2x1` | ~656,800 | ~21.52B | keep |
+
+Rank 64 would need a very large additional kernel win just to catch up with the
+current production chance-weighted rate. Do not pursue unless a separate R64
+kernel architecture emerges.
+
 ## 2026-05-18 H100 PoW Hot-Path Micro-Optimizations
 
 Pod artifacts:
