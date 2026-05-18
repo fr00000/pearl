@@ -175,6 +175,27 @@ headroom than the 24 GiB/32 GiB boundary. The 32 GiB B shape is not viable with
 the current cache layout because it needs another 32 GiB `BpEB` allocation and
 falls into repeated OOM handling.
 
+### Swizzle Recheck on Promoted Shape
+
+Pod artifact:
+
+```text
+/workspace/sweeps/h100-n524288-k32768-swizzle-20260518-165912/summary.csv
+```
+
+After promoting `n=524288,k=32768`, we rechecked the runtime swizzle setting
+because the prior `swizzle=8` winner was measured on earlier shapes.
+
+| Swizzle | Normalized attempts/s | Chance-weighted rate | Decision |
+|---:|---:|---:|---|
+| 4 | 649,692 | 21,289,117,416 | reject |
+| 8 | 661,253 | 21,667,952,568 | keep |
+| 12 | 659,604 | 21,613,914,274 | close, but lower |
+| 16 | 652,576 | 21,383,617,589 | reject |
+| 32 | 623,889 | 20,443,579,103 | reject |
+
+Decision: keep `--kernel-swizzle 8` for the promoted production shape.
+
 ## 2026-05-18 H100 Second-Pass Kernel Probes
 
 Pod artifacts:

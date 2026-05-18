@@ -70,6 +70,20 @@ Decision: promote `8192 x 524288 x 32768`. The 16 GiB B tensor captures the
 larger-N gain without the 24 GiB/32 GiB memory pressure. The 32 GiB B shape
 repeatedly OOMs when allocating `BpEB`.
 
+Swizzle recheck on the promoted shape:
+
+```text
+/workspace/sweeps/h100-n524288-k32768-swizzle-20260518-165912/summary.csv
+```
+
+| Swizzle | Final normalized attempts/s | Chance-weighted rate | Decision |
+|---:|---:|---:|---|
+| 4 | 649,692 | 21,289,117,416 | reject |
+| 8 | 661,253 | 21,667,952,568 | keep |
+| 12 | 659,604 | 21,613,914,274 | close, but lower |
+| 16 | 652,576 | 21,383,617,589 | reject |
+| 32 | 623,889 | 20,443,579,103 | reject |
+
 ### 2026-05-18 equal-B K confirmation
 
 Pod artifacts:
