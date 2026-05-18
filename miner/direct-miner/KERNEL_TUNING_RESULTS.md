@@ -311,6 +311,42 @@ The known-good production miner was restarted immediately and returned to
 The lost TMA/WGMMA overlap is larger than the saved producer warpgroup overhead,
 so a self-loading mainloop is not a viable shortcut to a mining win.
 
+## 2026-05-18 Nsight Systems Kernel-Time Profile
+
+Pod artifacts:
+
+```text
+/workspace/profiles/nsys-prod-k32768-20260518-111154.nsys-rep
+/workspace/profiles/nsys-prod-k32768-20260518-111154.sqlite
+/workspace/profiles/ncu-hopper-mine-ws-20260518-110746.log
+```
+
+Nsight Compute was attempted first, but the pod blocks GPU performance counters:
+
+```text
+ERR_NVGPUCTRPERM - The user does not have permission to access NVIDIA GPU
+Performance Counters on the target device 0.
+```
+
+Nsight Systems did capture a 48.3-second production run at the current H100
+setting (`completed=484`, `normalized_attempt_rate=657,327/s`). Kernel-time
+summary:
+
+| GPU kernel group | Total GPU time | Share | Avg per launch | Instances |
+|---|---:|---:|---:|---:|
+| `hopper_mine_ws` | 47.58 s | 97.9% | 98.31 ms | 484 |
+| PyTorch int8 random A generation | 0.51 s | 1.0% | 1.03 ms | 492 |
+| `MerkleTreeRootsKernel` | 0.24 s | 0.5% | 0.48 ms | 486 |
+| `NoisingKernelA` | 0.22 s | 0.5% | 0.46 ms | 484 |
+| `NoisingKernelB` | 0.02 s | ~0.0% | 10.8 ms | 2 |
+| Noise generation, commitment, root reduction, fills | <0.03 s combined | ~0.1% | tiny | mixed |
+
+Decision: the remaining major target is the `hopper_mine_ws` mainloop itself.
+Python overhead, A generation, Merkle hashing, noising, commitment hashing, and
+copies are all too small to produce a meaningful coin-rate jump. Future work
+should focus on changing the live accumulator/transcript structure inside the
+mine kernel, not on surrounding launch or preprocessing work.
+
 ## 2026-05-18 H100 PoW Hot-Path Micro-Optimizations
 
 Pod artifacts:

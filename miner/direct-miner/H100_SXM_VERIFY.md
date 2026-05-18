@@ -227,6 +227,41 @@ Decision: reject and revert. Losing warp-specialized overlap costs far more
 than the saved producer warpgroup. The known-good production miner was restarted
 immediately and returned to `~657k` normalized attempts/s.
 
+### 2026-05-18 Nsight Systems kernel-time profile
+
+Pod artifacts:
+
+```text
+/workspace/profiles/nsys-prod-k32768-20260518-111154.nsys-rep
+/workspace/profiles/nsys-prod-k32768-20260518-111154.sqlite
+/workspace/profiles/ncu-hopper-mine-ws-20260518-110746.log
+```
+
+Nsight Compute could not be used for stall counters because the pod blocks GPU
+performance-counter access (`ERR_NVGPUCTRPERM`). Nsight Systems did capture a
+48.3-second production run at the current H100 setting:
+
+```text
+completed=484
+normalized_attempt_rate=657,327/s
+chance_weighted_rate=21.54B/s
+```
+
+GPU kernel time was overwhelmingly concentrated in the headless mine kernel:
+
+| Kernel group | Share of GPU kernel time | Avg launch time |
+|---|---:|---:|
+| `hopper_mine_ws` | 97.9% | 98.31 ms |
+| PyTorch int8 random A generation | 1.0% | 1.03 ms |
+| `MerkleTreeRootsKernel` | 0.5% | 0.48 ms |
+| `NoisingKernelA` | 0.5% | 0.46 ms |
+| Everything else | ~0.1% | tiny |
+
+Conclusion: the major optimization surface is now only the `hopper_mine_ws`
+mainloop/transcript machinery. Optimizing Python, noising, Merkle roots, CUDA
+copies, or gateway-side launch plumbing cannot produce a large mining gain at
+this point.
+
 ### 2026-05-18 PoW hot-path micro-optimizations
 
 Pod artifacts:
