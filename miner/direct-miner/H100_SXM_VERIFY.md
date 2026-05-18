@@ -17,7 +17,7 @@ direct-miner command is:
 
 ```bash
 uv run direct-miner \
-  --m 8192 --n 524288 --k 32768 \
+  --m 8192 --n 1048576 --k 32768 \
   --max-in-flight 4 \
   --enable-b-cache \
   --enable-headless-kernel \
@@ -31,14 +31,14 @@ uv run direct-miner \
   --kernel-swizzle 8
 ```
 
-Confirmed four-minute rate:
-**661,689 normalized attempts/s per GPU**, or **21,682,231,004
+Confirmed five-minute rate:
+**663,491 normalized attempts/s per GPU**, or **21,741,288,261
 chance-weighted units/s**. Because the protocol difficulty target scales by
 `h * w * rounded_common_dim`, the coin-rate comparison across different `k`
-values is `normalized_attempt_rate * k`; this setting is **+0.81%** versus the
-prior `8192 x 262144 x 32768` production shape in a same-session paired
-confirmation. The H100 startup script uses this shape and kernel tune by
-default.
+values is `normalized_attempt_rate * k`; this setting is **+1.08%** versus the
+earlier `8192 x 262144 x 32768` production shape and **+0.27%** versus the
+intermediate 16 GiB B setting. The H100 startup script uses this shape and
+kernel tune by default.
 
 ### 2026-05-18 large-B K32768 confirmation
 
@@ -66,9 +66,30 @@ Four-minute confirmation:
 | `8192 x 262144 x 32768` | 8 GiB | 656,403 | 21,509,006,261 | baseline |
 | `8192 x 524288 x 32768` | 16 GiB | 661,689 | 21,682,231,004 | +0.81% |
 
-Decision: promote `8192 x 524288 x 32768`. The 16 GiB B tensor captures the
-larger-N gain without the 24 GiB/32 GiB memory pressure. The 32 GiB B shape
-repeatedly OOMs when allocating `BpEB`.
+Initial decision: promote `8192 x 524288 x 32768`. The 16 GiB B tensor
+captured the larger-N gain without the 24 GiB/32 GiB memory pressure seen in
+the first quick sweep. That was superseded by the stale-cache eviction fix
+below.
+
+Stale B-cache eviction fix:
+
+```text
+/workspace/sweeps/h100-large-b-evict-32g-20260518-172031/summary.csv
+```
+
+The initial 32 GiB B failure happened on template change: the old cached
+32 GiB `BpEB` was still held while the miner attempted to allocate the
+replacement. The fix synchronizes CUDA and evicts stale B-side artifacts before
+allocating the new template's B-side tensors.
+
+Post-fix confirmation:
+
+| Shape | B tensor | Final normalized attempts/s | Chance-weighted rate | Errors |
+|---|---:|---:|---:|---:|
+| `8192 x 1048576 x 32768` | 32 GiB | 663,491 | 21,741,288,261 | 0 |
+
+Decision: promote `8192 x 1048576 x 32768`. The run crossed a template change,
+logged the stale-cache eviction, and avoided the previous OOM churn.
 
 Swizzle recheck on the promoted shape:
 
@@ -83,6 +104,19 @@ Swizzle recheck on the promoted shape:
 | 12 | 659,604 | 21,613,914,274 | close, but lower |
 | 16 | 652,576 | 21,383,617,589 | reject |
 | 32 | 623,889 | 20,443,579,103 | reject |
+
+Max-in-flight recheck on the intermediate 16 GiB B shape:
+
+```text
+/workspace/sweeps/h100-n524288-k32768-mif-20260518-170948/summary.csv
+```
+
+| max_in_flight | Final normalized attempts/s | Chance-weighted rate | Decision |
+|---:|---:|---:|---|
+| 2 | 662,162 | 21,697,711,775 | tied |
+| 4 | 662,043 | 21,693,815,814 | keep default |
+| 6 | 661,344 | 21,670,935,795 | tied/lower |
+| 8 | 661,680 | 21,681,940,651 | tied |
 
 ### 2026-05-18 equal-B K confirmation
 

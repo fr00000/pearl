@@ -36,7 +36,7 @@ STATE_FILE="$HOME/.pearl_bootstrap_state"
 
 # Verified production shape/kernel — see H100_SXM_VERIFY.md.
 SHAPE_M=8192
-SHAPE_N=524288
+SHAPE_N=1048576
 SHAPE_K=32768
 MAX_IN_FLIGHT=4
 KERNEL_TILE_M=128

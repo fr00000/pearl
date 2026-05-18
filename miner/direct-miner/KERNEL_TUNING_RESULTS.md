@@ -10,7 +10,7 @@ benchmark notes live in `H100_SXM_VERIFY.md`.
 Keep the production direct-miner kernel at:
 
 ```bash
---m 8192 --n 524288 --k 32768 \
+--m 8192 --n 1048576 --k 32768 \
 --max-in-flight 4 \
 --enable-b-cache \
 --enable-headless-kernel \
@@ -25,10 +25,10 @@ Keep the production direct-miner kernel at:
 ```
 
 This is the H100-confirmed production setting after the 4 GiB tensor-hash fix,
-equal-B-memory K sweep, and large-B spare-VRAM confirmation. It uses a 16 GiB
-B tensor and keeps `k=32768`; the paired four-minute confirm measured
-`21,682,231,004` chance-weighted units/s, **+0.81%** versus the prior
-`8192x262144x32768` production shape.
+equal-B-memory K sweep, large-B spare-VRAM confirmation, and stale B-cache
+eviction fix. It uses a 32 GiB B tensor and keeps `k=32768`; the five-minute
+post-fix confirm measured `21,741,288,261` chance-weighted units/s, **+1.08%**
+versus the earlier `8192x262144x32768` production shape.
 
 ## 2026-05-18 Persistent Scheduler Probe
 
@@ -169,11 +169,42 @@ Four-minute paired confirmation:
 | `8192x262144x32768` | 8 GiB | 656,403 | 21,509,006,261 | baseline |
 | `8192x524288x32768` | 16 GiB | 661,689 | 21,682,231,004 | +0.81% |
 
-Decision: promote `8192x524288x32768` for H100 production. The 16 GiB B tensor
-captures almost all of the observed larger-N gain while leaving far more memory
-headroom than the 24 GiB/32 GiB boundary. The 32 GiB B shape is not viable with
-the current cache layout because it needs another 32 GiB `BpEB` allocation and
-falls into repeated OOM handling.
+Initial decision: promote `8192x524288x32768` for H100 production. The 16 GiB B
+tensor captured almost all of the observed larger-N gain with the cache layout
+available at the time. The first 32 GiB B run was rejected because template
+changes tried to allocate the new 32 GiB `BpEB` while the stale one was still
+held by the B-cache, causing repeated OOM handling.
+
+### Stale B-Cache Eviction Fix
+
+Pod artifact:
+
+```text
+/workspace/sweeps/h100-large-b-evict-32g-20260518-172031/summary.csv
+```
+
+We added a guarded B-cache eviction path for template changes: if a cache miss
+is caused by a new hash key while old B-side artifacts exist, the miner
+synchronizes CUDA, drops the stale artifacts, calls `torch.cuda.empty_cache()`,
+then allocates the new epoch's B-side tensors. This avoids requiring two
+32 GiB `BpEB` tensors to coexist across a template change.
+
+Five-minute 32 GiB B confirmation after the fix:
+
+| Shape | B tensor | Normalized attempts/s | Chance-weighted rate | Errors |
+|---|---:|---:|---:|---:|
+| `8192x1048576x32768` | 32 GiB | 663,491 | 21,741,288,261 | 0 |
+
+The run crossed a template change and logged:
+
+```text
+B-cache template change detected; synchronizing before evicting old B-side artifacts
+```
+
+Decision: promote `8192x1048576x32768` for H100 production. It is a smaller
+increment than the 8 GiB -> 16 GiB move, but it is a measured expected-coin
+gain over 16 GiB (`21.741B` vs `21.682B`, about `+0.27%`) and the eviction path
+removes the observed OOM failure mode.
 
 ### Swizzle Recheck on Promoted Shape
 
@@ -183,8 +214,9 @@ Pod artifact:
 /workspace/sweeps/h100-n524288-k32768-swizzle-20260518-165912/summary.csv
 ```
 
-After promoting `n=524288,k=32768`, we rechecked the runtime swizzle setting
-because the prior `swizzle=8` winner was measured on earlier shapes.
+After promoting the first large-B `n=524288,k=32768` shape, we rechecked the
+runtime swizzle setting because the prior `swizzle=8` winner was measured on
+earlier shapes. The later 32 GiB B confirmation also used `swizzle=8`.
 
 | Swizzle | Normalized attempts/s | Chance-weighted rate | Decision |
 |---:|---:|---:|---|
@@ -195,6 +227,25 @@ because the prior `swizzle=8` winner was measured on earlier shapes.
 | 32 | 623,889 | 20,443,579,103 | reject |
 
 Decision: keep `--kernel-swizzle 8` for the promoted production shape.
+
+### Max-In-Flight Recheck on 16 GiB Shape
+
+Pod artifact:
+
+```text
+/workspace/sweeps/h100-n524288-k32768-mif-20260518-170948/summary.csv
+```
+
+Queue depth was effectively flat on the 16 GiB B shape:
+
+| max_in_flight | Normalized attempts/s | Chance-weighted rate | Decision |
+|---:|---:|---:|---|
+| 2 | 662,162 | 21,697,711,775 | tied |
+| 4 | 662,043 | 21,693,815,814 | keep default |
+| 6 | 661,344 | 21,670,935,795 | tied/lower |
+| 8 | 661,680 | 21,681,940,651 | tied |
+
+Decision: no default change. The current queue is not the limiter.
 
 ## 2026-05-18 H100 Second-Pass Kernel Probes
 
