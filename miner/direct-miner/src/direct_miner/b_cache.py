@@ -67,6 +67,7 @@ class BSideCache:
         self.hits = 0
         self.misses = 0
         self.invalidations = 0
+        self.reuses = 0
 
     def get(self, hash_key: bytes) -> Optional[BSideArtifacts]:
         """Return cached artifacts if hash_key matches, else None.
@@ -115,6 +116,40 @@ class BSideCache:
             self.invalidations += 1
             return True
 
+    def take_reusable_if_mismatch(
+        self, hash_key: bytes
+    ) -> Optional[BSideArtifacts]:
+        """Remove and return stale artifacts for in-place recompute.
+
+        Template changes invalidate the contents of every B-side artifact,
+        but the tensor shapes stay fixed for a direct-miner process. After the
+        caller synchronizes GPU work, the old buffers can be safely overwritten
+        for the new template instead of freed and reallocated. This matters for
+        large-B production shapes where BpEB alone is tens of GiB.
+
+        Returns the stale artifact bundle when one existed, otherwise None.
+        The caller is responsible for synchronizing any GPU work that may still
+        reference the returned tensors before calling this method.
+        """
+        with self._lock:
+            if (
+                self._cached_hash_key is None
+                or self._artifacts is None
+                or self._cached_hash_key == hash_key
+            ):
+                return None
+            logger.debug(
+                "B-cache reusing stale buffers before recompute: %s -> %s",
+                self._cached_hash_key[:8].hex(),
+                hash_key[:8].hex(),
+            )
+            artifacts = self._artifacts
+            self._cached_hash_key = None
+            self._artifacts = None
+            self.invalidations += 1
+            self.reuses += 1
+            return artifacts
+
     def put(self, hash_key: bytes, artifacts: BSideArtifacts) -> None:
         """Store artifacts under hash_key, replacing any existing entry."""
         with self._lock:
@@ -145,6 +180,7 @@ class BSideCache:
                 "hits": self.hits,
                 "misses": self.misses,
                 "invalidations": self.invalidations,
+                "reuses": self.reuses,
                 "current_key_prefix": (
                     self._cached_hash_key[:8].hex()
                     if self._cached_hash_key

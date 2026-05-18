@@ -26,6 +26,7 @@ def test_evict_if_mismatch_drops_old_artifacts():
 
     assert cache.get(b"old-key") is None
     assert cache.stats()["invalidations"] == 1
+    assert cache.stats()["reuses"] == 0
     assert cache.stats()["current_key_prefix"] is None
 
 
@@ -39,3 +40,30 @@ def test_evict_if_mismatch_keeps_matching_artifacts():
 
     assert cache.get(b"same-key") is artifacts
     assert cache.stats()["invalidations"] == 0
+    assert cache.stats()["reuses"] == 0
+
+
+def test_take_reusable_if_mismatch_returns_old_artifacts_without_freeing():
+    cache = BSideCache()
+    artifacts = _artifacts()
+    cache.put(b"old-key", artifacts)
+
+    reusable = cache.take_reusable_if_mismatch(b"new-key")
+
+    assert reusable is artifacts
+    assert cache.get(b"old-key") is None
+    assert cache.stats()["invalidations"] == 1
+    assert cache.stats()["reuses"] == 1
+    assert cache.stats()["current_key_prefix"] is None
+
+
+def test_take_reusable_if_mismatch_keeps_matching_artifacts():
+    cache = BSideCache()
+    artifacts = _artifacts()
+    cache.put(b"same-key", artifacts)
+
+    assert cache.take_reusable_if_mismatch(b"same-key") is None
+
+    assert cache.get(b"same-key") is artifacts
+    assert cache.stats()["invalidations"] == 0
+    assert cache.stats()["reuses"] == 0

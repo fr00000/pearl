@@ -91,6 +91,27 @@ Post-fix confirmation:
 Decision: promote `8192 x 1048576 x 32768`. The run crossed a template change,
 logged the stale-cache eviction, and avoided the previous OOM churn.
 
+B-cache buffer reuse follow-up:
+
+```text
+/workspace/logs/direct-miner-h100-prod-n1048576-k32768-reuse-safe-20260518-182528.log
+```
+
+After validating the eviction path, we tightened template changes further:
+after synchronizing CUDA, the miner now reuses the stale B-side tensors in
+place for the next template instead of freeing and reallocating them. This
+preserves the safety boundary while avoiding allocator churn on the 32 GiB
+`BpEB` buffer. `commitment_hash_B` remains freshly allocated per template
+because the async proof callback can hold the previous template's commitment
+tensor.
+
+| Shape | B tensor | Normalized attempts/s at 1000 completions | Chance-weighted rate | Template reuses |
+|---|---:|---:|---:|---:|
+| `8192 x 1048576 x 32768` | 32 GiB | 662,150 | 21,697,347,094 | 2 |
+
+Decision: keep the reuse path. It is a stability/allocator-pressure improvement
+rather than a measurable steady-state throughput gain.
+
 Live churn sanity check:
 
 ```text

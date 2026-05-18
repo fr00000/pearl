@@ -298,6 +298,7 @@ def pearl_gemm_noisy_phase_c(
             b_cache.get(hash_key) if b_cache is not None else None
         )
         b_cache_hit = cached is not None
+        reusable: Optional[BSideArtifacts] = None
         if (
             cached is None
             and b_cache is not None
@@ -306,14 +307,15 @@ def pearl_gemm_noisy_phase_c(
             # A new template invalidates every B-side artifact, and large-B
             # shapes can have old BpEB allocations too large to coexist with
             # the replacement. Synchronize first so no in-flight main kernel
-            # can still read the old BpEB tensor, then evict before allocating
-            # the new epoch's B-side tensors.
+            # can still read the old BpEB tensor, then overwrite those buffers
+            # for the new epoch instead of freeing and reallocating them.
             logger.info(
                 "B-cache template change detected; synchronizing before "
-                "evicting old B-side artifacts"
+                "reusing old B-side buffers"
             )
             torch.cuda.synchronize(device=device)
-            if b_cache.evict_if_mismatch(hash_key):
+            reusable = b_cache.take_reusable_if_mismatch(hash_key)
+            if reusable is None and b_cache.evict_if_mismatch(hash_key):
                 torch.cuda.empty_cache()
 
         # ===== A-side prep on stream_prep =====
@@ -368,8 +370,10 @@ def pearl_gemm_noisy_phase_c(
             # key_tensor first.
             stream_main.wait_event(key_ready_event)
             with torch.cuda.stream(stream_main):
-                B_tensor_hash = torch.empty(
-                    32, dtype=torch.uint8, device=device
+                B_tensor_hash = (
+                    reusable.B_tensor_hash
+                    if reusable is not None
+                    else torch.empty(32, dtype=torch.uint8, device=device)
                 )
                 tensor_hash(
                     B.view(torch.uint8),
@@ -377,14 +381,39 @@ def pearl_gemm_noisy_phase_c(
                     B_tensor_hash,
                     slot.tensor_hash_scratchpad,
                 )
+                # Do not reuse commitment_hash_B across template epochs:
+                # StatusCheckCallback holds a reference to it and a rare win
+                # callback could still be constructing a proof after the GPU
+                # work has synchronized. The large B-side work buffers below
+                # are not handed to callbacks and are safe to overwrite.
                 commitment_hash_B_tensor = torch.empty(
                     32, dtype=torch.uint8, device=device
                 )
-                EBR = torch.empty((n, r), dtype=torch.int8, device=device)
-                EBR_fp16 = torch.empty((n, r), dtype=torch.float16, device=device)
-                EBL_R_major = torch.empty((k, r), dtype=torch.int8, device=device)
-                EBL_K_major = torch.empty((r, k), dtype=torch.int8, device=device)
-                BpEB = torch.empty((n, k), dtype=torch.int8, device=device)
+                EBR = (
+                    reusable.EBR
+                    if reusable is not None
+                    else torch.empty((n, r), dtype=torch.int8, device=device)
+                )
+                EBR_fp16 = (
+                    reusable.EBR_fp16
+                    if reusable is not None
+                    else torch.empty((n, r), dtype=torch.float16, device=device)
+                )
+                EBL_R_major = (
+                    reusable.EBL_R_major
+                    if reusable is not None
+                    else torch.empty((k, r), dtype=torch.int8, device=device)
+                )
+                EBL_K_major = (
+                    reusable.EBL_K_major
+                    if reusable is not None
+                    else torch.empty((r, k), dtype=torch.int8, device=device)
+                )
+                BpEB = (
+                    reusable.BpEB
+                    if reusable is not None
+                    else torch.empty((n, k), dtype=torch.int8, device=device)
+                )
 
             # stream_prep needs B_tensor_hash before commitment_hash below.
             b_hash_done = torch.cuda.Event()

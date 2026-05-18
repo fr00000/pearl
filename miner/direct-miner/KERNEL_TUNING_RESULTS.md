@@ -206,6 +206,30 @@ increment than the 8 GiB -> 16 GiB move, but it is a measured expected-coin
 gain over 16 GiB (`21.741B` vs `21.682B`, about `+0.27%`) and the eviction path
 removes the observed OOM failure mode.
 
+Follow-up: B-cache buffer reuse
+
+After promoting the 32 GiB shape, we replaced the template-change path's
+free/reallocate behavior with in-place reuse of the stale B-side buffers after
+the same required CUDA synchronization. This keeps the old correctness
+boundary, but avoids allocator churn on the largest tensor (`BpEB`, 32 GiB).
+`commitment_hash_B` is still allocated fresh per template because async
+submission callbacks may hold the previous tensor while constructing a rare
+winning proof.
+
+Live pod check:
+
+```text
+/workspace/logs/direct-miner-h100-prod-n1048576-k32768-reuse-safe-20260518-182528.log
+```
+
+| Shape | B tensor | Normalized attempts/s at 1000 completions | Chance-weighted rate | Template reuses | Errors |
+|---|---:|---:|---:|---:|---:|
+| `8192x1048576x32768` | 32 GiB | 662,150 | 21,697,347,094 | 2 | 0 |
+
+Decision: keep buffer reuse. It is not a steady-state throughput win; the value
+is lower allocator pressure and a cleaner template-change path while preserving
+the same live throughput band as the prior eviction fix.
+
 Live churn sanity check:
 
 ```text

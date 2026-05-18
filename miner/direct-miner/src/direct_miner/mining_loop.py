@@ -624,7 +624,8 @@ class DirectMiner:
                 stats = self.b_cache.stats()
                 hits, misses = stats["hits"], stats["misses"]
             invalidations = getattr(self.b_cache, "invalidations", 0)
+            reuses = getattr(self.b_cache, "reuses", 0)
             logger.info(
                 f"[BCACHE FINAL] hits={hits} misses={misses} "
-                f"invalidations={invalidations}"
+                f"invalidations={invalidations} reuses={reuses}"
             )
