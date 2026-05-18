@@ -82,6 +82,39 @@ class BSideCache:
             self.misses += 1
             return None
 
+    def has_different_key(self, hash_key: bytes) -> bool:
+        """Return True when an entry exists but belongs to another template."""
+        with self._lock:
+            return (
+                self._cached_hash_key is not None
+                and self._artifacts is not None
+                and self._cached_hash_key != hash_key
+            )
+
+    def evict_if_mismatch(self, hash_key: bytes) -> bool:
+        """Drop the cached entry if it belongs to another template.
+
+        Returns True when an entry was evicted. The caller is responsible for
+        synchronizing any GPU work that may still reference the old tensors
+        before calling this method.
+        """
+        with self._lock:
+            if (
+                self._cached_hash_key is None
+                or self._artifacts is None
+                or self._cached_hash_key == hash_key
+            ):
+                return False
+            logger.debug(
+                "B-cache evicting before recompute: %s -> %s",
+                self._cached_hash_key[:8].hex(),
+                hash_key[:8].hex(),
+            )
+            self._cached_hash_key = None
+            self._artifacts = None
+            self.invalidations += 1
+            return True
+
     def put(self, hash_key: bytes, artifacts: BSideArtifacts) -> None:
         """Store artifacts under hash_key, replacing any existing entry."""
         with self._lock:

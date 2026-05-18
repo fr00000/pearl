@@ -298,6 +298,23 @@ def pearl_gemm_noisy_phase_c(
             b_cache.get(hash_key) if b_cache is not None else None
         )
         b_cache_hit = cached is not None
+        if (
+            cached is None
+            and b_cache is not None
+            and b_cache.has_different_key(hash_key)
+        ):
+            # A new template invalidates every B-side artifact, and large-B
+            # shapes can have old BpEB allocations too large to coexist with
+            # the replacement. Synchronize first so no in-flight main kernel
+            # can still read the old BpEB tensor, then evict before allocating
+            # the new epoch's B-side tensors.
+            logger.info(
+                "B-cache template change detected; synchronizing before "
+                "evicting old B-side artifacts"
+            )
+            torch.cuda.synchronize(device=device)
+            if b_cache.evict_if_mismatch(hash_key):
+                torch.cuda.empty_cache()
 
         # ===== A-side prep on stream_prep =====
         # The H2D copy of key_tensor happens inside stream_prep so the
