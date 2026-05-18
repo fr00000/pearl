@@ -137,9 +137,10 @@ for cM, cN in [(1, 1), (2, 1)]:
 # - 128x256x256 stages=2 halves the number of mainloop K tiles and transcript
 #   writeback points at the same problem K, trading more shared memory per stage
 #   for less loop/control overhead.
-# - 256x256x128 uses four MMA warpgroups per CTA. Normalized attempts per
-#   matmul are comparable to 128x256, but the larger CTA may improve or hurt
-#   TMA reuse and scheduling; measure rather than assume.
+# - 256x256x128 was considered but is intentionally omitted: the H100 pod
+#   build showed the current transcript path needs ~154 registers/thread for
+#   that shape, while a 640-thread CTA is capped near 96 by the SM register
+#   budget. That path needs a deeper live-state rewrite before it is feasible.
 for pipeline_stages, cM, cN, mma_registers in [
     (2, 1, 1, 0),
     (2, 2, 1, 160),
@@ -167,23 +168,6 @@ for cM, cN, mma_registers in [
         tile_size_k=256,
         R=128,
         pipeline_stages=2,
-        cM=cM,
-        cN=cN,
-        mma_registers=mma_registers,
-    )
-
-for cM, cN, mma_registers in [
-    (1, 1, 160),
-    (1, 1, 192),
-    (2, 1, 160),
-    (2, 1, 192),
-]:
-    _add_matmul_kernel(
-        tile_size_m=256,
-        tile_size_n=256,
-        tile_size_k=128,
-        R=128,
-        pipeline_stages=3,
         cM=cM,
         cN=cN,
         mma_registers=mma_registers,
