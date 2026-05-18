@@ -173,6 +173,30 @@ for cM, cN, mma_registers in [
         mma_registers=mma_registers,
     )
 
+# Deep H100 tile-M geometry probe. 64x256 underproduces normalized lottery
+# tickets and 256x256 exceeds the H100 register budget as a config-only change.
+# 192x256 is the remaining intermediate geometry: three MMA warpgroups, 384
+# PoW-checking consumer threads per CTA, and still compatible with the default
+# proof column pattern.
+for cM, cN, mma_registers in [
+    (1, 1, 112),
+    (1, 1, 128),
+    (1, 1, 144),
+    (2, 1, 112),
+    (2, 1, 128),
+    (2, 1, 144),
+]:
+    _add_matmul_kernel(
+        tile_size_m=192,
+        tile_size_n=256,
+        tile_size_k=128,
+        R=128,
+        pipeline_stages=3,
+        cM=cM,
+        cN=cN,
+        mma_registers=mma_registers,
+    )
+
 # Noising A: 64x64, fp16/int32
 _noising_a_kernels = [
     NoisingAKernelConfig(
