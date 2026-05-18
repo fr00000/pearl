@@ -187,9 +187,6 @@ for tile_size_m, cM, cN, mma_registers in [
     (256, 2, 1, 96),
     (256, 1, 1, 112),
     (256, 2, 1, 112),
-    (320, 1, 1, 80),
-    (320, 2, 1, 80),
-    (384, 1, 1, 64),
 ]:
     _add_matmul_kernel(
         tile_size_m=tile_size_m,
