@@ -213,22 +213,6 @@ for cM, cN, mma_registers in [
         mma_registers=mma_registers,
     )
 
-# Headless-only wide-M register-pressure probes. These stay out of the ordinary
-# GEMM switch and use a one-warp producer so 192x256 CTAs have 416 threads
-# instead of 512, raising PTXAS' register cap enough to test the next valid
-# setmaxnreg target above the 154-register request.
-for cM, cN in [(1, 1), (2, 1)]:
-    _add_mine_only_matmul_kernel(
-        tile_size_m=192,
-        tile_size_n=256,
-        tile_size_k=128,
-        R=128,
-        pipeline_stages=3,
-        cM=cM,
-        cN=cN,
-        mma_registers=160,
-    )
-
 # Noising A: 64x64, fp16/int32
 _noising_a_kernels = [
     NoisingAKernelConfig(

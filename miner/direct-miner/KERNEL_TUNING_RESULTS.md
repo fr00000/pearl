@@ -1235,3 +1235,52 @@ After pruning the scalar probe, the final clean branch rebuilt successfully:
 ```text
 /workspace/build-logs/h100-final-pruned-mine-switch-parallel-20260518-151145.log
 ```
+
+### Shared Transcript and One-Producer Wide-M Probes
+
+We made two deeper attempts to unlock `192x256` for the headless mine-only
+kernel after the scalar XOR test showed the hash reduction itself was not the
+register cliff.
+
+First, the shared-transcript probe moved the 16-word BLAKE3 transcript scratch
+out of per-thread registers for wide-M mine-only kernels. This still failed at
+the same PTXAS point:
+
+```text
+/workspace/build-logs/h100-shared-transcript-wideM-parallel-20260518-155553.log
+```
+
+Result: `192x256x128`, `stages=3`, `cluster=1x1/2x1`, `regs=128` both failed
+with `Insufficient registers (128)` and `Try to compile with register target
+of 154 or higher`.
+
+Second, the one-producer-warp probe tried to reduce CTA size from 512 threads
+to 416 threads by using a single 32-thread producer warp instead of a full
+128-thread producer warpgroup. The goal was to raise the effective PTXAS
+register cap enough for the 154+ register request.
+
+Build logs:
+
+```text
+/workspace/build-logs/h100-one-producer-wideM-parallel-20260518-160542.log
+/workspace/build-logs/h100-one-producer-wideM-regs160-parallel-20260518-161119.log
+/workspace/build-logs/h100-one-producer-no-setmax-wideM-parallel-20260518-161703.log
+```
+
+Findings:
+
+- `mma_registers=154` is not a legal `setmaxnreg` immediate.
+- `mma_registers=160` still failed with `Insufficient registers (128)`.
+- Skipping dynamic `warpgroup_reg_alloc`/`warpgroup_reg_dealloc` for the
+  one-producer path still failed with the same 128-register cap.
+
+Conclusion: a simple partial-producer thread remap does not unlock wide-M. The
+compiler/hardware allocation model still behaves like the consumer threads are
+capped at 128 registers for this 192-wide CTA, likely because the launch or
+warpgroup allocation rounds the 13-warp CTA into the same limiting bucket. The
+probe was pruned from the default grid so the branch remains buildable.
+
+The practical research conclusion is now sharper: `192x256` needs a true
+live-state reduction in the MMA/mining path, not movement of hash scratch state
+or a smaller producer role. The dominant state is the WGMMA accumulator plus
+the transcript extraction state around `tCrC`.

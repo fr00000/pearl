@@ -136,8 +136,7 @@ __global__ void __launch_bounds__(
   }
 
   static_assert(KTraits::kNumWarps == 8 || KTraits::kNumWarps == 12 ||
-                KTraits::kNumWarps == 13 || KTraits::kNumWarps == 16 ||
-                KTraits::kNumWarps == 20);
+                KTraits::kNumWarps == 16 || KTraits::kNumWarps == 20);
   if (warp_group_idx == 0) {  // Producer
     // cutlass::arch::warpgroup_reg_dealloc<24>();
     cutlass::arch::warpgroup_reg_dealloc<KTraits::kNumWarps == 16 ? 32 : 24>();
@@ -317,9 +316,7 @@ __global__ void __launch_bounds__(
   PipelineParams pipeline_params;
   pipeline_params.transaction_bytes = CollectiveMainloop::TmaTransactionBytes;
   int warp_group_idx = cutlass::canonical_warp_group_idx();
-  bool const is_producer =
-      KTraits::UseOneProducerWarp ? threadIdx.x >= NumMmaThreads
-                                  : warp_group_idx == 0;
+  bool const is_producer = warp_group_idx == 0;
   pipeline_params.role = is_producer
                              ? MainloopPipeline::ThreadCategory::Producer
                              : MainloopPipeline::ThreadCategory::Consumer;
@@ -342,12 +339,9 @@ __global__ void __launch_bounds__(
   }
 
   static_assert(KTraits::kNumWarps == 8 || KTraits::kNumWarps == 12 ||
-                KTraits::kNumWarps == 13 || KTraits::kNumWarps == 16 ||
-                KTraits::kNumWarps == 20);
+                KTraits::kNumWarps == 16 || KTraits::kNumWarps == 20);
   if (is_producer) {
-    if constexpr (!KTraits::UseOneProducerWarp) {
-      cutlass::arch::warpgroup_reg_dealloc<KTraits::kNumWarps == 16 ? 32 : 24>();
-    }
+    cutlass::arch::warpgroup_reg_dealloc<KTraits::kNumWarps == 16 ? 32 : 24>();
 
     int warp_idx_in_warpgroup =
         __shfl_sync(0xffffffff,
@@ -381,17 +375,12 @@ __global__ void __launch_bounds__(
       }
     }
   } else {
-    if constexpr (!KTraits::UseOneProducerWarp) {
-      cutlass::arch::warpgroup_reg_alloc<KTraits::MmaRegisters>();
-    }
+    cutlass::arch::warpgroup_reg_alloc<KTraits::MmaRegisters>();
 
     TileScheduler scheduler{};
     typename KTraits::TiledMma tiled_mma;
     PipelineState smem_pipe_read;
-    int consumer_tix =
-        KTraits::UseOneProducerWarp
-            ? static_cast<int>(threadIdx.x)
-            : static_cast<int>(threadIdx.x) - NumCopyThreads;
+    int consumer_tix = static_cast<int>(threadIdx.x) - NumCopyThreads;
 
     collective_mainloop.mma_init();
 
