@@ -36,8 +36,8 @@ STATE_FILE="$HOME/.pearl_bootstrap_state"
 
 # Verified production shape/kernel — see H100_SXM_VERIFY.md.
 SHAPE_M=8192
-SHAPE_N=261888
-SHAPE_K=16384
+SHAPE_N=262144
+SHAPE_K=32768
 MAX_IN_FLIGHT=4
 KERNEL_TILE_M=128
 KERNEL_TILE_N=256
@@ -45,6 +45,8 @@ KERNEL_TILE_K=128
 KERNEL_STAGES=3
 KERNEL_CLUSTER_M=2
 KERNEL_CLUSTER_N=1
+KERNEL_MMA_REGISTERS=160
+KERNEL_SWIZZLE=8
 
 # Pearl daemon RPC config (pearld is on 44107; oyster — not used here —
 # would be on 44207)
@@ -425,6 +427,8 @@ for gpu_idx in $GPUS; do
         --kernel-stages "$KERNEL_STAGES" \
         --kernel-cluster-m "$KERNEL_CLUSTER_M" \
         --kernel-cluster-n "$KERNEL_CLUSTER_N" \
+        --kernel-mma-registers "$KERNEL_MMA_REGISTERS" \
+        --kernel-swizzle "$KERNEL_SWIZZLE" \
         --log-interval 200 \
         --phase-tag "prod_gpu${gpu_idx}" \
         --metrics-output "$metrics_file" \
@@ -449,9 +453,9 @@ done
 [[ "$LAUNCHED" -ge 1 ]] || die "No miners successfully launched"
 
 # ===== Done =====
-EXPECTED_TILES_PER_GPU=2500000
+EXPECTED_TILES_PER_GPU=1300000
 EXPECTED_TILES=$((LAUNCHED * EXPECTED_TILES_PER_GPU))
-EXPECTED_MM=$(awk -v g="$LAUNCHED" 'BEGIN { printf "%.1f", g * 19.1 }')
+EXPECTED_MM=$(awk -v g="$LAUNCHED" 'BEGIN { printf "%.1f", g * 19.9 }')
 
 cat <<EOF
 
@@ -463,8 +467,8 @@ cat <<EOF
   Miners launched:   $LAUNCHED
   Miners failed:     $FAILED
   Production shape:  ${SHAPE_M} × ${SHAPE_N} × ${SHAPE_K}, mif=$MAX_IN_FLIGHT
-  Kernel:            ${KERNEL_TILE_M}×${KERNEL_TILE_N}×${KERNEL_TILE_K}, stages=$KERNEL_STAGES, cluster=${KERNEL_CLUSTER_M}×${KERNEL_CLUSTER_N}, headless
-  Expected per-GPU:  ~2.50 M 128-equivalent attempts/s (~19.1 mm/s)
+  Kernel:            ${KERNEL_TILE_M}×${KERNEL_TILE_N}×${KERNEL_TILE_K}, stages=$KERNEL_STAGES, cluster=${KERNEL_CLUSTER_M}×${KERNEL_CLUSTER_N}, regs=$KERNEL_MMA_REGISTERS, swizzle=$KERNEL_SWIZZLE, headless
+  Expected per-GPU:  ~1.30 M 128-equivalent attempts/s (~19.9 mm/s)
   Expected total:    ~${EXPECTED_TILES} 128-equivalent attempts/s (~${EXPECTED_MM} mm/s aggregate)
 
 Useful commands:

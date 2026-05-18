@@ -41,12 +41,12 @@ void set_key(const uint8_t d_key[blake3::KEY_SIZE]) {
 // kThreadLoadSize: bytes loaded per TMA operation (defaults to 128)
 template <int kNumConsumerThreads, int kNumStages, int kLeavesPerMTBlock,
           int kThreadLoadSize = 128>
-void tensor_hash_impl(const uint8_t* data, uint32_t data_size, uint8_t* out,
+void tensor_hash_impl(const uint8_t* data, uint64_t data_size, uint8_t* out,
                       const uint8_t key[blake3::KEY_SIZE], uint32_t num_blocks,
                       uint8_t* roots, cudaDeviceProp& deviceProp,
                       cudaStream_t stream) {
   set_key(key);
-  const u32 data_len = data_size;
+  const u64 data_len = data_size;
 
   using MerkleTreeRootsKernel =
       pearl::MerkleTreeRootsKernel<kNumConsumerThreads, kNumStages,
@@ -127,7 +127,12 @@ void tensor_hash_impl(const uint8_t* data, uint32_t data_size, uint8_t* out,
 
   // Further aggregation of roots if we have multiple blocks
   if (num_blocks_for_mt > 1) {
-    using ReduceRootsKernel = pearl::ReduceRootsKernel<kNumConsumerThreads>;
+    TORCH_CHECK(num_blocks_for_mt <= kLeavesPerMTBlock,
+                "tensor_hash final reduction supports at most ",
+                kLeavesPerMTBlock,
+                " second-stage roots for this configuration, got ",
+                num_blocks_for_mt);
+    using ReduceRootsKernel = pearl::ReduceRootsKernel<kLeavesPerMTBlock>;
 
     typename ReduceRootsKernel::Arguments args3{
         reinterpret_cast<uint32_t*>(roots),
@@ -162,7 +167,7 @@ void tensor_hash_impl(const uint8_t* data, uint32_t data_size, uint8_t* out,
 // Dispatch helper for pipeline stages
 template <int kNumConsumerThreads, int kLeavesPerMTBlock>
 void dispatch_num_stages(uint32_t num_stages, const uint8_t* data,
-                         uint32_t data_size, uint8_t* out,
+                         uint64_t data_size, uint8_t* out,
                          const uint8_t key[blake3::KEY_SIZE],
                          uint32_t num_blocks, uint8_t* roots,
                          cudaDeviceProp& deviceProp, cudaStream_t stream) {
@@ -190,7 +195,7 @@ void dispatch_num_stages(uint32_t num_stages, const uint8_t* data,
 template <int kNumConsumerThreads>
 void dispatch_leaves_per_mt_block(uint32_t leaves_per_mt_block,
                                   uint32_t num_stages, const uint8_t* data,
-                                  uint32_t data_size, uint8_t* out,
+                                  uint64_t data_size, uint8_t* out,
                                   const uint8_t key[blake3::KEY_SIZE],
                                   uint32_t num_blocks, uint8_t* roots,
                                   cudaDeviceProp& deviceProp,
@@ -222,7 +227,7 @@ void dispatch_leaves_per_mt_block(uint32_t leaves_per_mt_block,
 // Supports up to 256 threads due to load distribution constraints.
 void dispatch_threads_per_block(
     uint32_t threads_per_block, uint32_t leaves_per_mt_block,
-    uint32_t num_stages, const uint8_t* data, uint32_t data_size, uint8_t* out,
+    uint32_t num_stages, const uint8_t* data, uint64_t data_size, uint8_t* out,
     const uint8_t key[blake3::KEY_SIZE], uint32_t num_blocks, uint8_t* roots,
     cudaDeviceProp& deviceProp, cudaStream_t stream) {
   switch (threads_per_block) {
@@ -249,7 +254,7 @@ void dispatch_threads_per_block(
 }
 
 void tensor_hash(
-    const uint8_t* data, uint32_t data_size, uint8_t* out,
+    const uint8_t* data, uint64_t data_size, uint8_t* out,
     const uint8_t key[32], uint32_t num_blocks,
     uint32_t threads_per_block,    // merkle_tree_roots_kernel threads
     uint32_t num_stages,           // merkle_tree_roots_kernel pipeline stages

@@ -220,13 +220,13 @@ class MerkleTreeRootsKernel {
 
   struct Arguments {
     const Element* ptr_data;
-    const u32 data_len;  // Data length in bytes
+    const u64 data_len;  // Data length in bytes
     Element* ptr_roots;
   };
 
   struct alignas(128) Params {
     const Element* ptr_data;
-    u32 data_len;  // Data length in bytes
+    u64 data_len;  // Data length in bytes
     Element* ptr_roots;
     TMA_A tma_load_A;
   };
@@ -502,7 +502,7 @@ class MerkleTreeRootsKernel {
                                     PipelineState& smem_pipe_write) {
     const int bid = blockIdx.x;
     // Use ceiling division to match TMA descriptor (includes partial chunks)
-    const int num_chunks =
+    const u64 num_chunks =
         (params.data_len + blake3::CHUNK_SIZE - 1) / blake3::CHUNK_SIZE;
 
     // View of our CTA's tile of A
@@ -610,7 +610,7 @@ class MerkleTreeRootsKernel {
       PipelineState& smem_pipe_write_0, PipelineState& smem_pipe_write_1) {
     const int bid = blockIdx.x;
     // Use ceiling division to match TMA descriptor (includes partial chunks)
-    const int num_chunks =
+    const u64 num_chunks =
         (params.data_len + blake3::CHUNK_SIZE - 1) / blake3::CHUNK_SIZE;
 
     // View of our CTA's tile of A (global memory)
@@ -702,13 +702,14 @@ class MerkleTreeRootsKernel {
 
     // Calculate if this thread is processing the last (potentially partial) chunk
     // Use ceiling division to include partial chunks in the count
-    const size_t num_chunks =
+    const u64 num_chunks =
         (params.data_len + blake3::CHUNK_SIZE - 1) / blake3::CHUNK_SIZE;
     const u32 remainder = params.data_len % blake3::CHUNK_SIZE;
     const u32 last_chunk_size =
         (remainder == 0) ? blake3::CHUNK_SIZE : remainder;
-    const u32 global_chunk_idx =
-        blockIdx.x * kNumConsumerThreads + consumer_tid;
+    const u64 global_chunk_idx =
+        static_cast<u64>(blockIdx.x) * kNumConsumerThreads +
+        static_cast<u64>(consumer_tid);
     const bool is_last_chunk = (global_chunk_idx == num_chunks - 1) &&
                                (last_chunk_size < blake3::CHUNK_SIZE);
 
@@ -777,13 +778,14 @@ class MerkleTreeRootsKernel {
 
     // Calculate if this thread is processing the last (potentially partial) chunk
     // Use ceiling division to include partial chunks in the count
-    const size_t num_chunks =
+    const u64 num_chunks =
         (params.data_len + blake3::CHUNK_SIZE - 1) / blake3::CHUNK_SIZE;
     const u32 remainder = params.data_len % blake3::CHUNK_SIZE;
     const u32 last_chunk_size =
         (remainder == 0) ? blake3::CHUNK_SIZE : remainder;
-    const u32 global_chunk_idx =
-        blockIdx.x * kNumConsumerThreads + consumer_tid;
+    const u64 global_chunk_idx =
+        static_cast<u64>(blockIdx.x) * kNumConsumerThreads +
+        static_cast<u64>(consumer_tid);
     const bool is_last_chunk = (global_chunk_idx == num_chunks - 1) &&
                                (last_chunk_size < blake3::CHUNK_SIZE);
 
@@ -852,7 +854,8 @@ class MerkleTreeRootsKernel {
 
     // Compress the block - all chunks are 1024 bytes, all blocks are 64 bytes
     blake3::CompressParams params{
-        .counter = blockIdx.x * kNumConsumerThreads + consumer_tid,
+        .counter = static_cast<u64>(blockIdx.x) * kNumConsumerThreads +
+                   static_cast<u64>(consumer_tid),
         .block_len = blake3::MSG_BLOCK_SIZE,
         .flags = blake3::KEYED_HASH};
 
@@ -899,7 +902,8 @@ class MerkleTreeRootsKernel {
     // Compress the block - all chunks are 1024 bytes, all blocks are 64 bytes
     // Use global_consumer_tid for counter (0-511 for proper chunk identification)
     blake3::CompressParams params{
-        .counter = blockIdx.x * kNumConsumerThreads + global_consumer_tid,
+        .counter = static_cast<u64>(blockIdx.x) * kNumConsumerThreads +
+                   static_cast<u64>(global_consumer_tid),
         .block_len = blake3::MSG_BLOCK_SIZE,
         .flags = blake3::KEYED_HASH};
 

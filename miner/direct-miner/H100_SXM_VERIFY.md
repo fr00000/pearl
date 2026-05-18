@@ -12,12 +12,12 @@ Does the H200 stress sweep winner (`stress_n256` = 8192 × 262144 × 8192) carry
 
 ## Current production winner
 
-As of the 2026-05-15 chance-weighted shape sweep, the recommended H100/Hopper
-direct-miner command is:
+As of the 2026-05-18 equal-B K confirmation, the recommended H100 direct-miner
+command is:
 
 ```bash
 uv run direct-miner \
-  --m 8192 --n 261888 --k 16384 \
+  --m 8192 --n 262144 --k 32768 \
   --max-in-flight 4 \
   --enable-b-cache \
   --enable-headless-kernel \
@@ -26,15 +26,154 @@ uv run direct-miner \
   --kernel-tile-k 128 \
   --kernel-stages 3 \
   --kernel-cluster-m 2 \
-  --kernel-cluster-n 1
+  --kernel-cluster-n 1 \
+  --kernel-mma-registers 160 \
+  --kernel-swizzle 8
 ```
 
-Confirmed 5-minute rate: **1,292,734 normalized attempts/s per GPU**. Because
-the protocol difficulty target scales by `h * w * rounded_common_dim`, the
-coin-rate comparison across different `k` values is
-`normalized_attempt_rate * k`; this shape is **+3.22% expected mining chance**
-versus the prior `8192 x 524032 x 8192` production reference. The startup
-scripts use this shape by default.
+Confirmed four-minute rate:
+**656,810 normalized attempts/s per GPU**, or **21,522,363,623
+chance-weighted units/s**. Because the protocol difficulty target scales by
+`h * w * rounded_common_dim`, the coin-rate comparison across different `k`
+values is `normalized_attempt_rate * k`; this setting is **+0.76%** versus the
+prior `8192 x 524288 x 16384` production shape in a same-session paired
+confirmation and about **+4.9% expected mining chance** versus the older
+`8192 x 524032 x 8192` production reference. The H100 startup script uses this
+shape and kernel tune by default.
+
+### 2026-05-18 equal-B K confirmation
+
+Pod artifacts:
+
+```text
+/workspace/sweeps/h100-equal-b-k-sweep-20260518-023622
+/workspace/sweeps/h100-k32768-confirm-20260518-024145
+```
+
+Quick equal-B sweep:
+
+| Shape | Final normalized attempts/s | Chance-weighted rate | Delta vs `524288x16384` |
+|---|---:|---:|---:|
+| `8192 x 1048576 x 8192` | 2,554,944 | 20,930,101,131 | -2.98% |
+| `8192 x 524288 x 16384` | 1,304,275 | 21,369,245,583 | baseline |
+| `8192 x 262144 x 32768` | 656,621 | 21,516,157,710 | +0.69% |
+| `8192 x 131072 x 65536` | 325,571 | 21,336,604,993 | -0.15% |
+
+Four-minute confirmation:
+
+| Shape | Final normalized attempts/s | Chance-weighted rate | Delta |
+|---|---:|---:|---:|
+| `8192 x 524288 x 16384` | 1,303,676 | 21,359,422,822 | baseline |
+| `8192 x 262144 x 32768` | 656,810 | 21,522,363,623 | +0.76% |
+
+Decision: promote `8192 x 262144 x 32768`. It keeps the same 8 GiB B tensor
+footprint as the previous production shape, while the A-slot pool grows from
+about 1.58 GiB to about 2.36 GiB at `max_in_flight=4`.
+
+### 2026-05-17 register/swizzle confirmation
+
+Pod artifacts:
+
+```text
+/workspace/sweeps/kernel-h100-20260517-175003/summary.csv
+/workspace/sweeps/h100-reg-swizzle-20260517-181544/summary.csv
+/workspace/sweeps/h100-confirm-regs160-sw8-20260517-183241/summary.csv
+```
+
+Five-minute paired result on the then-current same-k production shape:
+
+| Variant | Normalized attempts/s | Chance-weighted rate | Delta |
+|---|---:|---:|---:|
+| default registers / heuristic swizzle | 1,289,501 | 21,127,184,384 | baseline |
+| `--kernel-mma-registers 160 --kernel-swizzle 8` | 1,299,624 | 21,293,039,616 | +0.78% |
+
+Decision: promote the paired H100 tune. `--kernel-swizzle 8` alone was not a
+durable win, and nearby stage/cluster/tile changes were slower after normalized
+attempt accounting.
+
+Follow-up compiled-register test:
+`/workspace/sweeps/h100-compiled-regs-quick-20260517-205142/summary.csv`.
+Temporary `168`, `176`, and `184` cap instantiations were pattern-compatible
+but did not beat the `160` baseline repeat (`regs160_a=1,300,275`,
+`regs160_b=1,299,620`; best non-160 was `regs168=1,299,820`). Do not expand
+the production compiled grid for these caps.
+
+### 2026-05-17 post-hash-fix wide-n confirmation
+
+Pod artifacts:
+
+```text
+/workspace/sweeps/h100-k16384-posthash-n-sweep-20260517-213911
+/workspace/sweeps/h100-k16384-n524288-confirm-clean-20260517-215817
+/workspace/sweeps/h100-k16384-n589824-probe-20260517-221018
+```
+
+After the `tensor_hash` 4 GiB length fix, exact `n=524288` became usable at
+`k=16384`. A clean paired H100 run with the production kernel flags showed:
+
+| Shape | Steady normalized attempts/s | Chance-weighted rate | Delta |
+|---|---:|---:|---:|
+| `8192 x 261888 x 16384` | 1,297,955 | 21,265,694,720 | baseline |
+| `8192 x 524288 x 16384` | 1,303,908 | 21,363,228,672 | +0.46% |
+
+Use the steady-state progress lines for this comparison. On wide `n` runs, the
+timeout final line can include a 30-second callback drain after `SIGINT`, which
+underreports the mining rate while the miner was actually running.
+
+Decision: promote `n=524288` for H100 production. It is a small but measured
+expected coin-rate gain at the same `k`, with the same proof pattern and kernel
+configuration.
+
+Boundary update: the later tensor-hash final-reduction fix lifted the crash at
+`n=589824` and `n=655360`. The failure was the final `tensor_hash` root
+reducer, not B-noising. Both wider shapes now run, but quick same-session
+benchmarks stayed slightly below `n=524288` at fixed `k=16384`. The later
+equal-B K sweep superseded this fixed-`k` winner with `n=262144,k=32768`.
+
+Post-fix artifact:
+
+```text
+/workspace/sweeps/h100-wide-n-after-hash-reduce-20260518-021013
+```
+
+| Shape | Final normalized attempts/s | Chance-weighted rate | Delta vs `n=524288` |
+|---|---:|---:|---:|
+| `8192 x 524288 x 16384` | 1,307,898 | 21,428,592,900 | baseline |
+| `8192 x 589824 x 16384` | 1,305,191 | 21,384,243,439 | -0.21% |
+| `8192 x 655360 x 16384` | 1,306,144 | 21,399,857,011 | -0.13% |
+
+We also swept `m` at the current production `n=524288,k=16384` point:
+
+```text
+/workspace/sweeps/h100-m-sweep-after-hash-reduce-20260518-021643
+```
+
+| Shape | Final normalized attempts/s | Chance-weighted rate | Delta vs `m=8192` |
+|---|---:|---:|---:|
+| `4096 x 524288 x 16384` | 1,297,717 | 21,261,801,666 | -0.51% |
+| `8192 x 524288 x 16384` | 1,304,349 | 21,370,457,895 | baseline |
+| `12288 x 524288 x 16384` | 1,307,660 | 21,424,698,792 | +0.25% |
+| `16384 x 524288 x 16384` | 1,309,901 | 21,461,426,080 | +0.43% |
+
+The larger-M cells are valid but the gain is inside short-run noise and uses
+more A-slot VRAM, so keep production at `m=8192`.
+
+Finally, we swept queue depth at the production shape:
+
+```text
+/workspace/sweeps/h100-inflight-sweep-20260518-022217
+```
+
+| max_in_flight | Final normalized attempts/s | Chance-weighted rate | Delta vs 4 |
+|---:|---:|---:|---:|
+| 2 | 1,307,641 | 21,424,391,256 | +0.24% |
+| 3 | 1,304,650 | 21,375,388,968 | +0.01% |
+| 4 | 1,304,560 | 21,373,905,183 | baseline |
+| 5 | 1,304,996 | 21,381,046,302 | +0.03% |
+| 6 | 1,305,588 | 21,390,752,688 | +0.08% |
+
+Depth 2 through 6 are effectively tied. Keep production at `max_in_flight=4`;
+use depth 2 only as a low-VRAM mode.
 
 ## Results
 
@@ -634,9 +773,9 @@ Skipped/guard cells:
 Conclusion:
 
 - Keep production on `128x256x128, stages=3, cluster=2x1`.
-- Do **not** make `--kernel-mma-registers 160` the default yet. It was the best
-  5-minute cell, but only by +0.46%, which is below the threshold where the
-  operational risk and extra config surface are worth it.
+- Historical note: on this older `k=8192` shape, `--kernel-mma-registers 160`
+  alone was not promoted. The 2026-05-17 current-shape confirmation supersedes
+  that decision for `k=16384` by pairing `regs=160` with `swizzle=8`.
 - Do not pursue `tile_k=64`, `cluster_n=2`, or `stages=4` for this production
   shape.
 - Do not sweep `tile_n=128/512` as a simple runtime setting. The default proof
@@ -737,6 +876,132 @@ Production-shape hash distribution check:
   sampled attempts is about `221.443`, comfortably plausible for this sample
   size.
 - Best observed margin over target was `16.410 log2`.
+
+## Addendum: tensor_hash 4 GiB ceiling fix
+
+On 2026-05-17 we fixed the `tensor_hash` byte-length ceiling that blocked exact
+4 GiB B tensors. The root cause was a 32-bit `data_size` argument in the
+tensor-hash host/device launch path. A tensor with exactly `2^32` bytes
+truncated to zero before the SM90 Merkle roots kernel computed its grid shape.
+
+Patch summary:
+
+- Carry `data_size` / `data_len` as `uint64_t` through
+  `tensor_hash_decl.hpp`, `tensor_hash_host.hpp`, and
+  `merkle_tree_roots_kernel.hpp`.
+- Preserve the existing 32-bit root-count interface for the later reduction
+  kernels, but add an explicit host-side guard if `num_blocks` exceeds
+  `uint32_t`.
+- Promote BLAKE3 chunk-counter arithmetic to `uint64_t` so large tensor chunk
+  indices do not overflow before being written into the existing 64-bit
+  BLAKE3 counter field.
+
+Validation on the H100 pod:
+
+```text
+524288 x 8192 uint8 tensor
+num_bytes = 4,294,967,296 = 2^32
+scratchpad = 1,048,576 bytes
+tensor_hash runtime = 5.37 ms
+result: clean
+
+524289 x 8192 uint8 tensor
+num_bytes = 4,294,975,488 = 2^32 + 8192
+scratchpad = 1,048,608 bytes
+tensor_hash runtime = 5.63 ms
+result: clean
+```
+
+Boundary shape checks:
+
+| Shape | Normalized attempts/s | Chance-weighted/s | Result |
+|---|---:|---:|---|
+| `8192 x 524288 x 8192` | 2,501,449 | 20.492B | exact 4 GiB B hash works, not a new winner |
+| `8192 x 262144 x 16384` | 1,294,259 | 21.205B | exact 4 GiB B hash works, slightly below current winner |
+
+Conclusion at that point: the ceiling was fixed and exact 4 GiB B tensors were
+usable, but the exact boundary shapes were within measurement noise of the prior
+near-boundary cells at `k=8192`. The later `k=16384` wide-`n` confirmation above
+promotes `8192 x 524288 x 16384` for H100 production.
+
+## Addendum: post hash-fix H100 profile
+
+After the 4 GiB hash fix, Nsight Compute was retried with
+`--target-processes all` and a single `hopper_mine_ws` launch target. The pod
+host still blocks hardware performance counters:
+
+```text
+ERR_NVGPUCTRPERM - The user does not have permission to access NVIDIA GPU Performance Counters
+```
+
+The fallback Nsight Systems run used the then-current production H100 shape:
+
+```bash
+direct-miner \
+  --m 8192 --n 261888 --k 16384 \
+  --max-in-flight 4 --enable-b-cache --enable-headless-kernel \
+  --kernel-tile-m 128 --kernel-tile-n 256 --kernel-tile-k 128 \
+  --kernel-stages 3 --kernel-cluster-m 2 --kernel-cluster-n 1
+```
+
+Run result:
+
+```text
+completed=1638 elapsed=82.9s
+completion_rate=19.8/s
+normalized_attempt_rate=1,294,144/s
+chance_weighted_rate=21,203,256,794/s
+```
+
+Nsight Systems kernel-time summary:
+
+| Kernel | Time share | Avg time | Instances |
+|---|---:|---:|---:|
+| `hopper_mine_ws` | 98.0% | 49.898 ms | 1,638 |
+| A random/fill kernels | 1.0% | 0.483 ms | 1,641 |
+| `MerkleTreeRootsKernel` | 0.5% | 0.266 ms | 1,640 |
+| `NoisingKernelA` | 0.4% | 0.225 ms | 1,638 |
+| other hash/noise helpers | <0.1% each | | |
+
+Static resource usage from the same compiled extension still reports the
+production `hopper_mine_ws` path at:
+
+```text
+REG:168 STACK:64 SHARED:1024 LOCAL:0
+```
+
+Conclusion: after B-cache and headless mode, the meaningful H100 kernel lever
+is inside `hopper_mine_ws`. The surrounding hash/noise setup is now less than
+2% of GPU kernel time in steady state, and the current register allocation
+remains too high for a simple two-CTA-per-SM launch-bounds fix.
+
+### Mine-only pipeline cleanup checks
+
+Two small `hopper_mine_ws` cleanups were tested after the profile:
+
+1. Move `load_tail()` from after each logical work tile to producer exit.
+2. Skip the `MmaComplete` named-barrier arrive when `MineOnly=true`.
+
+Both compiled in parallel and passed the forced-win pattern inspector:
+
+```text
+PATTERN_COMPATIBLE=true
+rows=[0, 8]
+cols=[0, 1, 8, 9, ..., 248, 249]
+```
+
+Quick production-shape results:
+
+| Experiment | Normalized attempts/s | Chance-weighted/s | Decision |
+|---|---:|---:|---|
+| post-fix profile baseline | 1,294,144 | 21.203B | reference |
+| defer producer tail | 1,294,987 | 21.217B | neutral, rolled back |
+| skip `MmaComplete` arrive | 1,267,775 | 20.771B | slower, rolled back |
+
+The tail deferral is neutral because the current `SingleTileScheduler` gives
+each CTA exactly one logical work tile, so there is no next tile to overlap
+within the same CTA. The `MmaComplete` skip looked dead on paper but benchmarked
+slower, likely from schedule perturbation. Neither change should be promoted.
 
 Conclusion: production-shape kernel hash behavior is statistically sane. The
 kernel is producing the expected number of lottery tickets, and their quality

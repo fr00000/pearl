@@ -5,6 +5,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/python.h>
 #include <cstddef>
+#include <limits>
 // Include only the host function declaration
 #include "blake3/blake3_constants.hpp"
 #include "tensor_hash_decl.hpp"
@@ -72,30 +73,36 @@ void run_tensor_hash(
               "leaves_per_mt_block must be 256, 512, or 1024");
 
   constexpr size_t chunk_size = 1024;
+  const size_t data_bytes = static_cast<size_t>(data.numel());
 
   // We split data into chunks of size C (chunk_size)
-  size_t num_chunks = (data.numel() + chunk_size - 1) / chunk_size;
+  size_t num_chunks = (data_bytes + chunk_size - 1) / chunk_size;
   // We split chunks into blocks based on threads_per_block
   size_t num_blocks = (num_chunks + threads_per_block - 1) / threads_per_block;
+  TORCH_CHECK(num_blocks <= std::numeric_limits<uint32_t>::max(),
+              "tensor_hash currently supports at most ",
+              std::numeric_limits<uint32_t>::max(),
+              " scratchpad root blocks, got ", num_blocks);
 
   TORCH_INTERNAL_ASSERT(
       num_blocks * blake3::CHAINING_VALUE_SIZE ==
-          get_required_scratchpad_bytes(data.numel(), threads_per_block),
+          get_required_scratchpad_bytes(data_bytes, threads_per_block),
       "num_blocks=", num_blocks, " get_required_scratchpad_bytes=",
-      get_required_scratchpad_bytes(data.numel(), threads_per_block));
+      get_required_scratchpad_bytes(data_bytes, threads_per_block));
   TORCH_CHECK((size_t)roots.numel() >= get_required_scratchpad_bytes(
-                                           data.numel(), threads_per_block),
+                                           data_bytes, threads_per_block),
               "roots must have at least ", num_blocks, " * ",
               blake3::CHAINING_VALUE_SIZE, "bytes");
-  TORCH_CHECK((size_t)data.numel() > (1u << 17),
+  TORCH_CHECK(data_bytes > (1u << 17),
               "data must have more than 2^17 = 131072 bytes, got ",
               data.numel());
 
   auto stream = at::cuda::getCurrentCUDAStream();
   auto dprops = at::cuda::getCurrentDeviceProperties();
 
-  tensor_hash(data.data_ptr<uint8_t>(), data.numel(), out.data_ptr<uint8_t>(),
-              key.data_ptr<uint8_t>(), num_blocks,
+  tensor_hash(data.data_ptr<uint8_t>(), static_cast<uint64_t>(data_bytes),
+              out.data_ptr<uint8_t>(), key.data_ptr<uint8_t>(),
+              static_cast<uint32_t>(num_blocks),
               static_cast<uint32_t>(threads_per_block),
               static_cast<uint32_t>(num_stages),
               static_cast<uint32_t>(leaves_per_mt_block),

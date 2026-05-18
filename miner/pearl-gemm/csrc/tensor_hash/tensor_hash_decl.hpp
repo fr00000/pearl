@@ -10,7 +10,7 @@
 //   num_stages: Pipeline stages for merkle_tree_roots_kernel (2, 3, 4)
 //   leaves_per_mt_block: Threads for compute_blake_mt_kernel (256, 512, 1024)
 void tensor_hash(
-    const uint8_t* data, uint32_t data_size, uint8_t* out,
+    const uint8_t* data, uint64_t data_size, uint8_t* out,
     const uint8_t key[32], uint32_t num_blocks,
     uint32_t threads_per_block,    // merkle_tree_roots_kernel threads
     uint32_t num_stages,           // merkle_tree_roots_kernel pipeline stages

@@ -9,8 +9,8 @@ source "${REPO_DIR}/env.sh"
 
 # === Latest measured direct-mining defaults; see H100_SXM_VERIFY.md ===
 SHAPE_M="${SHAPE_M:-8192}"
-SHAPE_N="${SHAPE_N:-261888}"
-SHAPE_K="${SHAPE_K:-16384}"
+SHAPE_N="${SHAPE_N:-262144}"
+SHAPE_K="${SHAPE_K:-32768}"
 MAX_IN_FLIGHT="${MAX_IN_FLIGHT:-4}"
 KERNEL_TILE_M="${KERNEL_TILE_M:-128}"
 KERNEL_TILE_N="${KERNEL_TILE_N:-256}"
@@ -18,6 +18,8 @@ KERNEL_TILE_K="${KERNEL_TILE_K:-128}"
 KERNEL_STAGES="${KERNEL_STAGES:-3}"
 KERNEL_CLUSTER_M="${KERNEL_CLUSTER_M:-2}"
 KERNEL_CLUSTER_N="${KERNEL_CLUSTER_N:-1}"
+KERNEL_MMA_REGISTERS="${KERNEL_MMA_REGISTERS:-160}"
+KERNEL_SWIZZLE="${KERNEL_SWIZZLE:-8}"
 # ===========================================
 
 LOG_DIR="/workspace/production-logs"
@@ -39,7 +41,7 @@ fi
 GPUS=$(nvidia-smi --query-gpu=index --format=csv,noheader | tr '\n' ' ')
 echo "Detected GPUs: $GPUS"
 echo "Config: m=$SHAPE_M n=$SHAPE_N k=$SHAPE_K mif=$MAX_IN_FLIGHT"
-echo "Kernel: ${KERNEL_TILE_M}x${KERNEL_TILE_N}x${KERNEL_TILE_K} stages=${KERNEL_STAGES} cluster=${KERNEL_CLUSTER_M}x${KERNEL_CLUSTER_N} headless"
+echo "Kernel: ${KERNEL_TILE_M}x${KERNEL_TILE_N}x${KERNEL_TILE_K} stages=${KERNEL_STAGES} cluster=${KERNEL_CLUSTER_M}x${KERNEL_CLUSTER_N} regs=${KERNEL_MMA_REGISTERS} swizzle=${KERNEL_SWIZZLE} headless"
 echo ""
 
 for gpu_idx in $GPUS; do
@@ -60,6 +62,8 @@ for gpu_idx in $GPUS; do
         --kernel-stages "$KERNEL_STAGES" \
         --kernel-cluster-m "$KERNEL_CLUSTER_M" \
         --kernel-cluster-n "$KERNEL_CLUSTER_N" \
+        --kernel-mma-registers "$KERNEL_MMA_REGISTERS" \
+        --kernel-swizzle "$KERNEL_SWIZZLE" \
         --log-interval 500 \
         --phase-tag "h200_prod_gpu${gpu_idx}" \
         > "$log" 2>&1 &
