@@ -283,6 +283,9 @@ struct CollectiveMainloop {
     constexpr int k_blocks_per_tile = size<2>(tCrA);
     // R/32
     constexpr int reduce_every_k = get<2>(TileShape_MNR{}) / MMAAtom_K{};
+    constexpr bool final_hash_reduce_waits =
+        !SkipReduction && (k_blocks_per_tile >= reduce_every_k) &&
+        (k_blocks_per_tile % reduce_every_k == 0);
 
     using HashAccumulator =
         TileHashAccumulator<k_blocks_per_tile, reduce_every_k,
@@ -319,7 +322,9 @@ struct CollectiveMainloop {
         hash_accumulator.writeback(transcript_extraction_tensor);
       }
 
-      warpgroup_wait<0>();
+      if constexpr (!final_hash_reduce_waits) {
+        warpgroup_wait<0>();
+      }
       // Release the stage of the pipeline for TMA
       pipeline.consumer_release(smem_pipe_read);
       ++smem_pipe_read;
