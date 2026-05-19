@@ -61,6 +61,13 @@ class DirectMiner:
             raise ValueError(
                 "--enable-transcript-kernel requires --enable-headless-kernel"
             )
+        if config.enable_transcript_kernel and config.max_in_flight > 1:
+            raise ValueError(
+                "--enable-transcript-kernel is a research-only path that "
+                "allocates a large transcript buffer per in-flight slot; "
+                "run it with --max-in-flight 1 to avoid unnecessary VRAM "
+                "pressure"
+            )
         self.config = config
         self.b_pool: Optional[FixedBPool] = None
 

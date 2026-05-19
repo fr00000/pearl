@@ -71,7 +71,7 @@ def main():
         "--enable-transcript-kernel", action="store_true",
         help="research-only split mining path: write transcripts from the "
              "main kernel and check them in a second kernel. Allocates a "
-             "large transcript buffer; benchmark with low max-in-flight."
+             "large transcript buffer and requires --max-in-flight 1."
     )
     parser.add_argument(
         "--kernel-tile-m", type=int, default=128,
