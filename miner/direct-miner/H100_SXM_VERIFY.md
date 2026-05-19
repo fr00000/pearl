@@ -1431,3 +1431,34 @@ Decision: reject for production. The split path is correct but slower by about
 1.9%, because it keeps the same producer register footprint and adds transcript
 global-memory traffic plus a second kernel launch. Future high-impact H100 work
 still needs to reduce live state inside the main WGMMA transcript path itself.
+
+### Mainloop Final-Wait Skip Check
+
+On 2026-05-19 we tested the first follow-up mine-only mainloop cleanup after
+the split checker result. The branch skips the post-loop `warpgroup_wait<0>()`
+when the final transcript reduction already waited for the last WGMMA batch.
+
+The change built cleanly in parallel:
+
+```text
+/workspace/build-logs/h100-mainloop-rewrite-parallel-20260519-023057.log
+```
+
+Static resource usage did not change:
+
+```text
+hopper_mine_ws REG:160 STACK:64 SHARED:1024
+```
+
+Matched 90-second benchmark at `8192x1048576x32768`, `max_in_flight=4`,
+`cluster=2x1`, `stages=3`, `regs=160`, `swizzle=8`:
+
+| Path | Normalized attempts/s | Chance-weighted/s |
+|---|---:|---:|
+| Baseline production venv | 662,735 | 21.717B |
+| Final-wait skip branch | 663,675 | 21.747B |
+
+Decision: neutral, not a confirmed mining win. The measured delta is only
+about +0.14%, so it is useful as a safe branch probe but not large enough to
+promote by itself. Production was restarted on the known-good H100 venv after
+the benchmark.

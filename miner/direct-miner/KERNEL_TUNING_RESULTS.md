@@ -1679,3 +1679,49 @@ global-memory transcript write plus a second kernel launch. This rules out
 "move BLAKE3/check out of the main kernel" as a near-term H100 speedup. The
 remaining large path is still a true live-state rewrite inside the WGMMA
 producer/consumer mainloop, not a post-mainloop checker split.
+
+### Mainloop Final-Wait Skip Probe
+
+On 2026-05-19 we started the next mine-only mainloop pass with a narrow
+producer/consumer cleanup: when the final transcript reduction for a tile
+already executes `warpgroup_wait<0>()`, skip the unconditional post-loop
+`warpgroup_wait<0>()` before releasing the TMA pipeline stage. This applies to
+the production `bK=R=128` path because the only reduction for the tile happens
+on the last K block.
+
+Build:
+
+```text
+/workspace/build-logs/h100-mainloop-rewrite-parallel-20260519-023057.log
+```
+
+Static resource usage stayed unchanged for the production config:
+
+```text
+hopper_mine_ws REG:160 STACK:64 SHARED:1024
+```
+
+Matched 90-second production-shape benchmark at
+`8192x1048576x32768`, `max_in_flight=4`, `cluster=2x1`,
+`stages=3`, `regs=160`, `swizzle=8`:
+
+| Path | Normalized attempts/s | Chance-weighted/s | Delta |
+|---|---:|---:|---:|
+| Baseline production venv | 662,735 | 21.717B | reference |
+| Final-wait skip branch | 663,675 | 21.747B | +0.14% |
+
+Logs:
+
+```text
+/workspace/logs/h100-mainloop-baseline-20260519-024237.log
+/workspace/logs/h100-mainloop-waitskip-20260519-024420.log
+```
+
+Decision: neutral. This is directionally positive but well inside short-run
+noise, and it does not reduce registers. Keep it as a safe branch experiment,
+but do not count it as a production mining win without a longer A/B. The H100
+production miner was restarted on the known-good venv after the benchmark:
+
+```text
+/workspace/logs/direct-miner-h100-prod-n1048576-k32768-restored-after-mainloop-bench-20260519-024559.log
+```
