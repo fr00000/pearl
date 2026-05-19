@@ -213,6 +213,45 @@ for cM, cN, mma_registers in [
         mma_registers=mma_registers,
     )
 
+# Narrow proof-pattern mining probes. These require a matching mining
+# configuration with tile_size_n=128 and a cols_pattern contained within
+# [0, 127]. They intentionally do not preserve the default 256-column proof
+# pattern, so benchmark them by protocol_weighted_rate, not raw or normalized
+# attempts. The goal is to cut per-thread accumulator state enough to unlock
+# a faster mine-only mainloop.
+for cM, cN, mma_registers in [
+    (1, 1, 0),
+    (2, 1, 128),
+    (2, 1, 160),
+]:
+    _add_mine_only_matmul_kernel(
+        tile_size_m=128,
+        tile_size_n=128,
+        tile_size_k=128,
+        R=128,
+        pipeline_stages=3,
+        cM=cM,
+        cN=cN,
+        mma_registers=mma_registers,
+    )
+
+# Wider-M narrow-N probe. This is the first post-live-state-reduction attempt
+# to recover more work per CTA without exceeding the SM register budget. The
+# explicit 96-register variant is the plausible buildable target for a
+# 640-thread CTA; the default variant is included to expose whether PTXAS can
+# find a better allocation after the N dimension is narrowed.
+for mma_registers in [0, 96]:
+    _add_mine_only_matmul_kernel(
+        tile_size_m=256,
+        tile_size_n=128,
+        tile_size_k=128,
+        R=128,
+        pipeline_stages=3,
+        cM=1,
+        cN=1,
+        mma_registers=mma_registers,
+    )
+
 # Noising A: 64x64, fp16/int32
 _noising_a_kernels = [
     NoisingAKernelConfig(
